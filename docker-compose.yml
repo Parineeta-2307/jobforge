@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: jobforge
+      POSTGRES_PASSWORD: jobforge
+      POSTGRES_DB: jobforge
+    ports:
+      - "5432:5432"
+    volumes:
+      # Files here run once, the first time the database volume is created.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobforge -d jobforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    env_file: .env.example
+    environment:
+      DATABASE_URL: postgresql://jobforge:jobforge@postgres:5432/jobforge
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  scheduler:
+    build: .
+    command: python -m app.scheduler
+    environment:
+      DATABASE_URL: postgresql://jobforge:jobforge@postgres:5432/jobforge
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # Run several workers: docker compose up --scale worker=3
+  worker:
+    build: .
+    command: python -m app.worker
+    environment:
+      DATABASE_URL: postgresql://jobforge:jobforge@postgres:5432/jobforge
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres: {condition: service_healthy}
+
+volumes:
+  pgdata:
