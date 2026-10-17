@@ -1,8 +1,22 @@
 """HTTP API. Endpoints are stubs: implement them in the order given in docs/BUILD_PLAN.md."""
 
+import psycopg
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, Field, field_validator
+
+from app.db import get_pool
 
 app = FastAPI(title="jobforge")
+
+
+class TenantIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        # Trim spaces first, so "   " becomes "" and then fails the min_length check.
+        return v.strip() if isinstance(v, str) else v
 
 
 @app.get("/health")
@@ -11,9 +25,16 @@ def health() -> dict:
 
 
 @app.post("/tenants")
-def create_tenant() -> dict:
-    # TODO (Weekend 1): insert into tenants, return the row.
-    raise HTTPException(status_code=501, detail="not implemented")
+def create_tenant(body: TenantIn) -> dict:
+    with get_pool().connection() as conn:
+        try:
+            row = conn.execute(
+                "INSERT INTO tenants (name) VALUES (%s) RETURNING id, name",
+                (body.name,),
+            ).fetchone()
+        except psycopg.errors.UniqueViolation:
+            raise HTTPException(status_code=409, detail="tenant name already exists") from None
+    return {"id": str(row[0]), "name": row[1]}
 
 
 @app.post("/jobs")
