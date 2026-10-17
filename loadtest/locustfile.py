@@ -1,4 +1,7 @@
-"""Load test for the API. Run: locust -f loadtest/locustfile.py --host http://localhost:8000, then open http://localhost:8089.
+"""Load test for the API.
+
+Run: locust -f loadtest/locustfile.py --host http://localhost:8000
+Then open http://localhost:8089.
 
 TODO (Weekend 3): create a few tenants with different quotas in on_start, then have users
 submit jobs. Record in the README: requests per second, p95 latency, and the share of 429s
