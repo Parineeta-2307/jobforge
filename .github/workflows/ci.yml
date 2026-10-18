@@ -45,6 +45,10 @@ jobs:
       - name: Lint
         run: ruff check .
       - name: Apply schema
-        run: PGPASSWORD=jobforge psql -h localhost -U jobforge -d jobforge -f migrations/001_init.sql
+        run: |
+          for f in $(ls migrations/*.sql | sort); do
+            echo "applying $f"
+            PGPASSWORD=jobforge psql -v ON_ERROR_STOP=1 -h localhost -U jobforge -d jobforge -f "$f"
+          done
       - name: Test
         run: pytest
