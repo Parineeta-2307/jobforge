@@ -12,5 +12,5 @@ def test_health():
 
 
 def test_unimplemented_routes_say_so():
-    # Delete this test as you implement the routes.
-    assert client.post("/jobs").status_code == 501
+    # Delete this test as you implement the routes. Only the redrive endpoint is left (Weekend 2).
+    assert client.post("/dead-letters/abc/redrive").status_code == 501
