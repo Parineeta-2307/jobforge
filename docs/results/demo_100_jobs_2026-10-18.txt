@@ -1,0 +1,27 @@
+machine: HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U 2 cores/4 threads, 7.8 GB RAM, Windows 11 Home build 26300, local PostgreSQL 16.15
+setup: 1 uvicorn process, 1 scheduler, 3 workers, 100 sleep(1s) jobs, Redis not running (limiter failing open, breaker active)
+date: 2026-10-18
+tenant 364f5ecf-c8c8-4614-a992-b8549e9e4183
+submitted 100 jobs in 1.8s
+  1.9s  {'leased': 1, 'ready': 64}
+  3.9s  {'leased': 2, 'ready': 94, 'succeeded': 4}
+  5.9s  {'leased': 3, 'ready': 88, 'succeeded': 9}
+  7.9s  {'leased': 3, 'ready': 82, 'succeeded': 15}
+  9.9s  {'leased': 3, 'ready': 76, 'succeeded': 21}
+ 11.9s  {'leased': 3, 'ready': 70, 'succeeded': 27}
+ 13.9s  {'leased': 3, 'ready': 64, 'succeeded': 33}
+ 15.9s  {'leased': 3, 'ready': 58, 'succeeded': 39}
+ 17.9s  {'leased': 3, 'ready': 52, 'succeeded': 45}
+ 19.9s  {'leased': 3, 'ready': 46, 'succeeded': 51}
+ 21.9s  {'leased': 3, 'ready': 40, 'succeeded': 57}
+ 23.9s  {'leased': 3, 'ready': 34, 'succeeded': 63}
+ 25.9s  {'succeeded': 69, 'leased': 3, 'ready': 28}
+ 27.9s  {'succeeded': 75, 'leased': 3, 'ready': 22}
+ 29.9s  {'succeeded': 81, 'leased': 3, 'ready': 16}
+ 31.9s  {'succeeded': 87, 'leased': 3, 'ready': 10}
+ 33.9s  {'succeeded': 93, 'leased': 3, 'ready': 4}
+ 35.9s  {'succeeded': 99, 'leased': 1}
+ 37.9s  {'succeeded': 100}
+all 100 succeeded after 37.9s
+runs per worker: [('Pari-352a0a', 34), ('Pari-370af8', 33), ('Pari-94cba4', 33)]
+runs that ran more than once or did not succeed exactly once: 0

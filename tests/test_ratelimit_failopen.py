@@ -18,18 +18,31 @@ client = TestClient(app)
 LIMITS = "SELECT points_quota_per_hour, burst_rps, max_concurrency FROM tenants WHERE id = %s"
 
 
-def test_job_is_accepted_when_redis_is_down_and_no_limit_headers_are_sent(
+def test_job_is_accepted_when_redis_is_down_and_the_breaker_skips_redis_afterwards(
     tenant, monkeypatch, caplog
 ):
+    calls = []
+
     def redis_is_down():
+        calls.append(1)
         raise redis.ConnectionError("simulated outage")
 
     monkeypatch.setattr(ratelimit, "get_redis", redis_is_down)
-    body = {"tenant_id": str(tenant), "name": "while-redis-is-down", "job_type": "noop"}
-    r = client.post("/jobs", json=body)
-    assert r.status_code == 200  # fail open: the outage does not stop job submission
-    assert "X-RateLimit-Limit" not in r.headers
+    monkeypatch.setattr(ratelimit, "_retry_redis_at", 0.0)  # restored when the test ends
+
+    def post(name):
+        body = {"tenant_id": str(tenant), "name": name, "job_type": "noop"}
+        return client.post("/jobs", json=body)
+
+    first = post("while-redis-is-down-1")
+    assert first.status_code == 200  # fail open: the outage does not stop job submission
+    assert "X-RateLimit-Limit" not in first.headers
     assert "rate limiter unavailable" in caplog.text  # and it is logged
+    assert len(calls) == 1
+
+    second = post("while-redis-is-down-2")
+    assert second.status_code == 200
+    assert len(calls) == 1  # the breaker is open, so Redis was not tried again
 
 
 def test_tenant_limits_default_to_the_database_defaults(db):

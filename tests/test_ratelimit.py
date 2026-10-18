@@ -47,7 +47,8 @@ def clean_keys():
 
 
 @pytest.fixture(autouse=True)
-def delete_test_tenants(db):
+def delete_test_tenants(db, monkeypatch):
+    monkeypatch.setattr(ratelimit, "_retry_redis_at", 0.0)  # a breaker left open must not leak in
     yield
     db.execute("DELETE FROM tenants WHERE name LIKE 'test-rl-%'")
 

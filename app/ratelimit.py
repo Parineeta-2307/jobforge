@@ -12,6 +12,7 @@ both spend the last token.
 
 import logging
 import math
+import time
 from datetime import UTC, datetime
 
 import redis
@@ -79,6 +80,22 @@ return {1, limit - used}
 """
 
 _client: redis.Redis | None = None
+
+# Circuit breaker. A dead Redis makes every connection attempt wait for a timeout (about 1 second
+# on Windows), and the API would pay that on every request while it fails open. After one
+# failure we skip Redis completely for REDIS_RETRY_SECONDS, then try again.
+REDIS_RETRY_SECONDS = 5
+_retry_redis_at = 0.0
+
+
+def redis_available() -> bool:
+    """False while the breaker is open, i.e. shortly after a Redis failure."""
+    return time.monotonic() >= _retry_redis_at
+
+
+def mark_redis_down() -> None:
+    global _retry_redis_at
+    _retry_redis_at = time.monotonic() + REDIS_RETRY_SECONDS
 
 
 def get_redis() -> redis.Redis:

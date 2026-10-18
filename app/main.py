@@ -87,6 +87,8 @@ def apply_rate_limit(body: JobIn) -> dict[str, str]:
     burst_rps, quota = tenant
     tenant_id = str(body.tenant_id)
     cost = ratelimit.JOB_TYPE_COST[body.job_type]
+    if not ratelimit.redis_available():
+        return {}  # the breaker is open: Redis failed a moment ago, do not wait for it again
 
     try:
         # Bucket: holds burst_rps tokens and refills burst_rps per second.
@@ -102,6 +104,7 @@ def apply_rate_limit(body: JobIn) -> dict[str, str]:
             # No refund of the burst token spent above: simpler, and the request did arrive.
             reject(quota, left, reset_in, "quota", "hourly quota exceeded")
     except (redis.RedisError, OSError):
+        ratelimit.mark_redis_down()
         log.warning("rate limiter unavailable, allowing the request", exc_info=True)
         return {}
     return ratelimit.rate_limit_headers(quota, left, ratelimit.is_near_limit(quota, left))

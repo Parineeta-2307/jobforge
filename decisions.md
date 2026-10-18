@@ -1084,3 +1084,17 @@ for burst still read the quota? What exactly does the 50-thread test prove? Why 
   **You must run `chaos_report` yourself for numbers you can quote.**
 - Honest limit: kills hit a worker at random moments, so it cannot prove every interleaving is safe;
   it is evidence, not a proof. The unit tests cover the specific races (fencing, double effect).
+
+### Part O addendum: first quotable results, and a bug the measuring found
+
+- **Chaos report** (`docs/results/chaos_2026-10-18.json`, run on the HP Pavilion x360 14-dh1xxx, i3-10110U,
+  7.8 GB RAM, PostgreSQL 16.15; lease 3 s, heartbeat 1 s): 5 scenarios, each 60 runs on 3 workers with a hard
+  kill every 2 s. Every scenario finished with no problems found (none lost, none doubled, no stale
+  overwrite). Recovery from kill to the next attempt: min 2.14 s, median 2.9 s, max 3.81 s, so about the lease length plus polling.
+- **100-job demo** (`docs/results/demo_100_jobs_2026-10-18.txt`): 100 of 100 succeeded, none ran twice,
+  split 34/33/33 across 3 workers, 37.9 s total, on the same machine (Redis not running, so the limiter was failing open).
+- **Bug found while measuring:** the first demo run took 102.9 s just to submit the jobs
+  (`..._before_breaker.txt`). With Redis down, every request waited for the connection to fail (about 1 s on
+  Windows) before failing open. I added a circuit breaker (after one Redis failure, skip Redis for 5 s). Submission then took
+  1.8 s. Test: the second request while the breaker is open does not call Redis. This also
+  replaces the "each request waits up to 0.5 s" limitation noted in Part N.

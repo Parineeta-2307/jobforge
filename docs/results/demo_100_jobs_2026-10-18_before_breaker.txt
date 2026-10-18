@@ -1,0 +1,10 @@
+machine: HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U 2 cores/4 threads, 7.8 GB RAM, Windows 11 Home build 26300, local PostgreSQL 16.15
+setup: 1 uvicorn process, 1 scheduler, 3 workers, 100 sleep(1s) jobs, Redis not running (rate limiter failing open)
+date: 2026-10-18
+tenant 5ed6d8a3-5663-4fdd-b150-14af108fe1a2
+submitted 100 jobs in 102.9s
+103.0s  {'succeeded': 98, 'leased': 1}
+105.0s  {'succeeded': 100}
+all 100 succeeded after 105.0s
+runs per worker: [('Pari-e09e2a', 8), ('Pari-ec7a91', 52), ('Pari-f1414a', 40)]
+runs that ran more than once or did not succeed exactly once: 0
