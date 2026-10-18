@@ -28,7 +28,7 @@ class JobIn(BaseModel):
     # retention_days, version and enabled are not here on purpose: the DB defaults decide them.
     tenant_id: UUID
     name: str = Field(min_length=1, max_length=100)
-    job_type: Literal["noop", "sleep"]
+    job_type: Literal["noop", "sleep", "record", "flaky"]
     payload: dict = Field(default_factory=dict)
     interval_seconds: int | None = Field(default=None, ge=1)  # None means a one-off job
     max_attempts: int = Field(default=5, ge=1, le=10)

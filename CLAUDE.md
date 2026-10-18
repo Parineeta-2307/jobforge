@@ -45,7 +45,7 @@ IDs are never sent by the client. Postgres generates them.
 - Python 3.12, FastAPI, Pydantic v2, psycopg 3 with psycopg_pool, plain SQL (no ORM), PostgreSQL 16, Redis, pytest, ruff, Locust, GitHub Actions.
 - SQL is parameterised with %s, never string formatting. JSON columns use psycopg.types.json.Jsonb.
 - Style: follow the existing endpoint pattern (with get_pool().connection() as conn, catch psycopg.errors.UniqueViolation and ForeignKeyViolation, raise HTTPException ... from None). Ruff: line length 100, rules E, F, I, B.
-- Job types accepted by the API today: "noop" and "sleep". Note: JOB_TYPE_COST in app/ratelimit.py still lists placeholder types (noop, http_call, report). Align it with the real job types when the rate limiter is built.
+- Job types accepted by the API today: "noop", "sleep", "record" (writes one job_effects row keyed by run id) and "flaky" (test-only: fails while attempt <= payload.fail_times). Note: JOB_TYPE_COST in app/ratelimit.py still lists placeholder types (noop, http_call, report). Align it with the real job types when the rate limiter is built.
 
 ## Repository layout
 app/ (config.py, db.py, main.py, ratelimit.py, scheduler.py, worker.py), migrations/001_init.sql, tests/ (conftest.py with shared fixtures, test_health.py, test_schema.py, test_jobs.py, test_runs_api.py, test_scheduler.py, test_worker.py, test_worker_kill.py), scripts/demo_100_jobs.py, loadtest/locustfile.py, docs/ (SPEC.md: what to build next, DESIGN.md with 10 interview trade-off questions, BUILD_PLAN.md with the 3-weekend checklist), decisions.md (reasoning log: what was chosen, why, trade-offs, interview questions), .github/workflows/ci.yml, pyproject.toml, requirements.txt, requirements-dev.txt, README.md. docker-compose.yml and Dockerfile exist but are optional and untested.
@@ -56,8 +56,8 @@ CI (GitHub Actions) runs on every push: install requirements-dev.txt, ruff check
 
 ## Current status
 Weekend 1 is done and tested locally (not yet committed as of 2026-10-18): POST /tenants, POST /jobs (job types noop and sleep), GET /runs/{id}, scheduler create_due_runs (missed occurrences are skipped after downtime), worker claim with SKIP LOCKED, lease, heartbeat thread, fencing-token-guarded complete and fail, retries with backoff and jitter, dead letters, lease reaper, and tests for all of it. scripts/demo_100_jobs.py is the "100 jobs, 3 workers" check; Pari has not re-run it herself, so quote no number from it yet.
-W2-1 done locally: migrations/002_weekend2.sql is applied (attempt_base, job_effects, redrive_log, tenants_name_not_blank), and ci.yml now applies every file in migrations/ in order with ON_ERROR_STOP. Still to confirm: CI green on a pushed branch. Next task: W2-2.
-Not started (Weekend 2 and 3): idempotent side effect, per-tenant concurrency and fair claiming, redrive endpoint (still a 501 stub on purpose), Redis rate limiter, SLA verifier, chaos test, load test, README content, DESIGN.md answers.
+W2-1 done locally: migrations/002_weekend2.sql is applied (attempt_base, job_effects, redrive_log, tenants_name_not_blank), and ci.yml now applies every file in migrations/ in order with ON_ERROR_STOP. CI is green with it (Pari confirmed). W2-2 done: job types record and flaky; the effect insert is ON CONFLICT (run_id) DO NOTHING. Pari pushes are authorised straight to main. Next task: W2-3 (redrive).
+Not started (Weekend 2 and 3): per-tenant concurrency and fair claiming, redrive endpoint (still a 501 stub on purpose), Redis rate limiter, SLA verifier, chaos test, load test, README content, DESIGN.md answers.
 Next task and the full spec for everything remaining: docs/SPEC.md. Work through it in order.
 
 ## Plan (docs/BUILD_PLAN.md has the checklist)

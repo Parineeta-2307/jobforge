@@ -233,3 +233,85 @@ def test_run_one_sends_a_bad_job_straight_to_dead_letters(db, make_job, make_run
     run = claim_run(db, "w1")
     run_one(run)
     assert _state(db, run_id) == "dead"
+
+
+# ---- idempotent side effect: job types record and flaky (W2-2) -----------------------------
+
+
+def _effects(db, run_id):
+    row = db.execute("SELECT count(*) FROM job_effects WHERE run_id = %s", (run_id,)).fetchone()
+    return row[0]
+
+
+def _make_due_again(db, run_id):
+    """Skip the backoff wait: make a retry_wait run claimable right now."""
+    db.execute("UPDATE job_runs SET available_at = %s WHERE id = %s", (ANCIENT, run_id))
+
+
+def test_executing_the_same_record_run_twice_leaves_one_effect(db, make_job, make_run):
+    run_id = make_run(make_job(job_type="record"))
+    run = claim_run(db, "w1")
+    execute(run)
+    execute(run)  # a repeat delivery of the same run
+    assert _effects(db, run_id) == 1
+
+
+def test_record_run_finished_by_two_workers_leaves_one_effect(db, make_job, make_run):
+    run_id = make_run(make_job(job_type="record"))
+
+    old = claim_run(db, "old-worker")
+    _expire_lease(db, run_id)  # the old worker stalls and its lease runs out
+    reap_expired_leases(db)
+    new = claim_run(db, "new-worker")
+    assert new["id"] == run_id
+
+    # Both workers finish the job. The old one is stale but does not know it yet.
+    execute(old)
+    execute(new)
+    assert _effects(db, run_id) == 1
+
+    assert complete(db, old) is False  # fencing token: the stale result is discarded
+    assert complete(db, new) is True
+    assert _state(db, run_id) == "succeeded"
+
+
+def test_record_effect_belongs_to_the_runs_tenant(db, tenant, make_job, make_run):
+    run_id = make_run(make_job(job_type="record"))
+    execute(claim_run(db, "w1"))
+    row = db.execute("SELECT tenant_id FROM job_effects WHERE run_id = %s", (run_id,)).fetchone()
+    assert row == (tenant,)
+
+
+def test_flaky_job_fails_twice_then_succeeds_on_attempt_3(db, make_job, make_run):
+    run_id = make_run(make_job(job_type="flaky", payload={"fail_times": 2}, max_attempts=5))
+    for _ in range(3):
+        run_one(claim_run(db, "w1"))
+        _make_due_again(db, run_id)
+    assert _state(db, run_id) == "succeeded"
+    assert _outcomes(db, run_id) == ["failed", "failed", "succeeded"]
+    attempt = db.execute("SELECT attempt FROM job_runs WHERE id = %s", (run_id,)).fetchone()
+    assert attempt == (3,)
+
+
+def test_flaky_job_that_never_recovers_ends_dead_with_a_dead_letter(db, make_job, make_run):
+    run_id = make_run(make_job(job_type="flaky", payload={"fail_times": 9}, max_attempts=5))
+    for _ in range(5):
+        run_one(claim_run(db, "w1"))
+        _make_due_again(db, run_id)
+    assert _state(db, run_id) == "dead"
+    assert _outcomes(db, run_id) == ["failed"] * 5
+    reason = db.execute("SELECT reason FROM dead_letters WHERE run_id = %s", (run_id,)).fetchone()
+    assert reason is not None and reason[0].startswith("out of attempts")
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        {"job_type": "record", "payload": {"seconds": -1}},
+        {"job_type": "flaky", "payload": {"fail_times": "two"}},
+        {"job_type": "flaky", "payload": {"fail_times": True}},
+    ],
+)
+def test_record_and_flaky_reject_bad_payloads_as_permanent_errors(run):
+    with pytest.raises(PermanentError):
+        execute({**run, "id": None, "tenant_id": None, "attempt": 1})

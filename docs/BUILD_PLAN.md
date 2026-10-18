@@ -8,20 +8,20 @@ Commit after every checked box so the history shows steady progress.
 - [ ] `docker compose up --build`, open http://localhost:8000/health, then `make psql` and run `\dt`.
 
 ## Weekend 1: core (about 8 h)
-- [ ] POST /tenants and POST /jobs write to Postgres (psycopg, plain SQL).
-- [ ] Scheduler: `create_due_runs` with `ON CONFLICT (job_id, scheduled_for) DO NOTHING`.
-- [ ] Worker: `claim_run` with `FOR UPDATE SKIP LOCKED`, lease, fencing token bump, attempt row.
-- [ ] Worker: `execute` for two job types, `noop` and `sleep`.
-- [ ] Worker: `complete` guarded by the fencing token (UPDATE ... WHERE fencing_token = %s, check rowcount).
-- [ ] Worker: heartbeat thread and `reap_expired_leases`.
-- [ ] Worker: `fail` with exponential backoff plus jitter, dead_letters after max_attempts.
-- [ ] GET /runs/{id}.
-- [ ] Tests for claim (two workers never get the same run), lease expiry, and the fencing guard.
+- [x] POST /tenants and POST /jobs write to Postgres (psycopg, plain SQL).
+- [x] Scheduler: `create_due_runs` with `ON CONFLICT (job_id, scheduled_for) DO NOTHING`.
+- [x] Worker: `claim_run` with `FOR UPDATE SKIP LOCKED`, lease, fencing token bump, attempt row.
+- [x] Worker: `execute` for two job types, `noop` and `sleep`.
+- [x] Worker: `complete` guarded by the fencing token (UPDATE ... WHERE fencing_token = %s, check rowcount).
+- [x] Worker: heartbeat thread and `reap_expired_leases`.
+- [x] Worker: `fail` with exponential backoff plus jitter, dead_letters after max_attempts.
+- [x] GET /runs/{id}.
+- [x] Tests for claim (two workers never get the same run), lease expiry, and the fencing guard.
 
 Done when: submit 100 jobs with 3 workers running, all reach `succeeded`, none twice.
 
 ## Weekend 2: idempotency, fairness, rate limiting (about 7 h)
-- [ ] Idempotent side effect: the run id as a key, with a unique constraint on the effect table.
+- [x] Idempotent side effect: the run id as a key, with a unique constraint on the effect table.
 - [ ] Per-tenant `max_concurrency` and fair claiming across tenants.
 - [ ] Redis token bucket in a Lua script (burst), hourly points quota (quota), rate-limit headers, 429 with Retry-After.
 - [ ] Redrive endpoint for dead letters.

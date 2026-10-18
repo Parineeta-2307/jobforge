@@ -618,3 +618,105 @@ interview; the three questions were:
 - *The trade-off:* what breaks if redrive resets `attempt` to 0, and what does `attempt_base` cost?
 
 Answers (fill in later): (pending)
+
+---
+
+## Part K: W2-2, idempotent side effect (job types `record` and `flaky`)
+
+### K1. The effect is "insert a row into `job_effects` keyed by the run id", with `ON CONFLICT (run_id) DO NOTHING`
+- The `record` job sleeps `payload.seconds` (default 0, to hold the lease open in tests), then runs
+  `INSERT INTO job_effects (run_id, tenant_id) VALUES (%s, %s) ON CONFLICT (run_id) DO NOTHING`.
+- A second execution of the same run hits the primary key and inserts nothing (rowcount 0). So the
+  run may *execute* twice, but its visible effect exists once. That is the answer to DESIGN.md Q4:
+  delivery is at-least-once, the *outcome* is exactly-once because the key is the run id.
+- **Why the run id is the right key, not a random token made in the worker:** the run id is created
+  once, when the scheduler inserts the run, and every retry and every worker sees the same one. A
+  token generated inside `execute` would differ on each execution and could never match.
+- **Alternative rejected: check, then insert** (`SELECT` for a row, insert if absent). Two workers
+  can both see "absent" and both insert (a race). The primary key makes the database the referee.
+
+### K2. Why the effect and "mark succeeded" cannot be one atomic action, so the unique key is the right tool
+- A real effect (send an email, call a payment API, write to another system) happens *outside* our
+  Postgres. We cannot put "send the email" and "UPDATE job_runs SET state='succeeded'" in one
+  transaction, because the email server does not take part in our commit.
+- So there are always two steps, with a gap between them where the worker can die:
+  - Effect first, then mark succeeded: a crash in the gap means the effect happened but the run
+    still says leased. The lease expires, another worker re-runs it. **At-least-once** (the effect
+    could happen twice).
+  - Mark succeeded first, then effect: a crash in the gap means the run says done but the effect
+    never happened. **At-most-once** (the effect is lost).
+- We cannot have "exactly once" in the middle. We choose the first order (never lose work) and make
+  the repeat harmless: the effect is idempotent, keyed by run id. The code does exactly this:
+  `execute` writes the effect, then `complete` marks succeeded.
+- In this project `job_effects` happens to live in the same database, so I *could* put it in the
+  same transaction as `complete`. I did not, on purpose. It would hide the real problem. The point
+  is to build what you must do when the effect is external, and `job_effects` stands in for that
+  external system. Be ready to say this out loud.
+- **Alternatives rejected:** two-phase commit across systems (slow, needs every system to support
+  it, hard to run); a transactional outbox (a good pattern, but it needs a separate publisher
+  process, out of scope); "at-most-once" (loses work, wrong for a scheduler).
+
+### K3. `execute` uses its own pooled connection for the effect insert
+- `execute` runs after the claim transaction has committed and the connection was released
+  (`main` releases it before running the job). So it takes a fresh connection from the pool, and
+  `with get_pool().connection()` commits when the block ends.
+- The effect is therefore committed *before* `complete` runs. That is the order in K2.
+
+### K4. The effect is written even by a worker that has lost its lease
+- A stalled worker that wakes up after its lease expired still runs `execute`, so it still inserts
+  its effect. That is fine and intended: it is the same key, so if the new worker already wrote it
+  the insert is a no-op, and if the old one is first the new worker's insert is the no-op. Either
+  way, one row. What the stale worker cannot do is `complete`: the fencing token rejects it.
+- Test `test_record_run_finished_by_two_workers_leaves_one_effect` runs exactly this story.
+- **Division of labour, a good interview line:** fencing tokens protect *our* state (the run row),
+  idempotency keys protect the *outside world*. You need both.
+
+### K5. `flaky` is test-only
+- Payload `fail_times` (a number >= 0). It raises a plain `RuntimeError` (so it is a transient
+  error, retried with backoff) while `run["attempt"] <= fail_times`, then succeeds.
+- It lets me drive retry and dead-letter paths end to end: `fail_times=2, max_attempts=5` ends
+  `succeeded` on attempt 3 with attempt outcomes `failed, failed, succeeded`; `fail_times=9` ends
+  `dead` with a `dead_letters` row after 5 failed attempts.
+- Not documented as a product feature. It is accepted by the API (the `Literal` includes it) because
+  the load test needs to create it through the API. The scope list in SPEC.md allows exactly `noop`,
+  `sleep`, `record` and `flaky`.
+- **Known limit:** after a redrive (W2-3) `attempt` keeps counting up (that is the point of
+  `attempt_base`), so `flaky` compares against the absolute `attempt`, as SPEC.md says. A redriven
+  flaky job will therefore succeed immediately. Fine for tests; do not read more into it.
+
+### K6. One small shared helper, `_number(payload, key, default)`
+- `sleep` already validated `seconds`; `record` and `flaky` need the same rule (a number, not a
+  bool, not negative). Rather than copy the check three times, one helper raises `PermanentError`
+  with the key name in the message. It is the only new abstraction. Bad payloads still go straight
+  to dead letters on the first attempt (retrying cannot fix them).
+- This changed the error text for `sleep` from "sleep needs payload.seconds >= 0" to
+  "payload.seconds must be a number >= 0". No test depended on the old text.
+
+### K7. Verification
+- `ruff check .` passes. Plain `pytest` with `DATABASE_URL` set: **53 passed, 1 skipped** (the
+  Weekend 3 placeholder).
+- **I checked the tests really catch the bug.** I temporarily removed `ON CONFLICT ... DO NOTHING`
+  from `record_effect`: the two idempotency tests failed with a unique violation (2 failed, 6 passed
+  in the record/flaky group). I put it back and they pass again.
+- New tests: same `record` run twice gives one effect; two workers finishing one run after a lease
+  expiry gives one effect and only the current worker's `complete` succeeds; the effect carries the
+  run's tenant; `flaky` 2 failures then success (3 attempts); `flaky` 9 failures then dead with a
+  dead letter; bad payloads are permanent errors; the API accepts `record` and `flaky`.
+
+### K8. Two likely interview questions
+1. **"Your queue is at-least-once. How do you stop a job doing its work twice?"** Idempotency key:
+   the run id, with a unique constraint at the place the effect is recorded; the second attempt
+   inserts nothing. At-least-once delivery plus an idempotent effect behaves like exactly-once.
+2. **"Why not just do the effect and mark success in one transaction?"** Only possible if the effect
+   is in the same database. For an external system there is a gap where the worker can die. You can
+   close it only by choosing at-least-once (effect first) and making repeats safe.
+
+### In my words (understanding gate, W2-2)
+Pending. Questions:
+- *How it works:* what happens, step by step, when two workers both finish the same run?
+- *What happens when it fails:* the worker dies after the effect row is written but before
+  `complete`. What state is the run in, and what happens next?
+- *The trade-off:* why did I write the effect before `complete`, and what would be lost if I
+  reversed the order?
+
+Answers: (pending)

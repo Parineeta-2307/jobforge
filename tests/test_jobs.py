@@ -80,3 +80,9 @@ def test_payload_round_trips(tenant_id):
         row = c.execute("SELECT payload FROM jobs WHERE id = %s", (r.json()["id"],)).fetchone()
     # psycopg turns a jsonb column back into a Python dict.
     assert row[0] == payload
+
+
+@pytest.mark.parametrize("job_type", ["record", "flaky"])
+def test_record_and_flaky_job_types_are_accepted(tenant_id, job_type):
+    r = client.post("/jobs", json=_job(tenant_id, job_type=job_type))
+    assert r.status_code == 200

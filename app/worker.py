@@ -67,21 +67,54 @@ def claim_run(conn, worker_id: str = WORKER_ID) -> dict | None:
     }
 
 
+def _number(payload: dict, key: str, default):
+    """Read a non-negative number from the payload, or raise a permanent error."""
+    value = payload.get(key, default)
+    # bool is a subclass of int in Python, so rule it out explicitly.
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise PermanentError(f"payload.{key} must be a number >= 0, got {value!r}")
+    return value
+
+
+def record_effect(run: dict) -> None:
+    """The visible side effect of a 'record' job: one row in job_effects, keyed by the run id.
+
+    ON CONFLICT DO NOTHING is what makes it idempotent. If this run executes a second time (a
+    retry, or a worker that came back after losing its lease), the primary key on run_id stops a
+    second row and the insert quietly does nothing.
+    It uses its own pooled connection because execute() runs outside the claim transaction.
+    """
+    with get_pool().connection() as conn:
+        conn.execute(
+            "INSERT INTO job_effects (run_id, tenant_id) VALUES (%s, %s) "
+            "ON CONFLICT (run_id) DO NOTHING",
+            (run["id"], run["tenant_id"]),
+        )
+
+
 def execute(run: dict) -> None:
     """Do the job's work. The run id is the idempotency key for any side effect.
 
-    Neither job type has a side effect yet, so there is nothing to de-duplicate (Weekend 2 adds
-    an effect table with a unique constraint on run id).
+    noop:   does nothing.
+    sleep:  sleeps payload.seconds (default 1).
+    record: sleeps payload.seconds (default 0) to hold the lease, then writes the effect row.
+    flaky:  test-only. Fails (transient) while attempt <= payload.fail_times, then succeeds.
     """
     job_type = run["job_type"]
+    payload = run["payload"]
     if job_type == "noop":
         return
     if job_type == "sleep":
-        seconds = run["payload"].get("seconds", 1)
-        # bool is a subclass of int in Python, so rule it out explicitly.
-        if isinstance(seconds, bool) or not isinstance(seconds, int | float) or seconds < 0:
-            raise PermanentError(f"sleep needs payload.seconds >= 0, got {seconds!r}")
-        time.sleep(seconds)
+        time.sleep(_number(payload, "seconds", 1))
+        return
+    if job_type == "record":
+        time.sleep(_number(payload, "seconds", 0))
+        record_effect(run)
+        return
+    if job_type == "flaky":
+        fail_times = _number(payload, "fail_times", 0)
+        if run["attempt"] <= fail_times:
+            raise RuntimeError(f"flaky: attempt {run['attempt']} of {fail_times} planned failures")
         return
     raise PermanentError(f"unknown job_type {job_type!r}")
 
