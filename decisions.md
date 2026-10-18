@@ -720,3 +720,103 @@ Pending. Questions:
   reversed the order?
 
 Answers: (pending)
+
+---
+
+## Part L: W2-3, audited redrive of dead-lettered runs
+
+### L1. Endpoint shape
+- `POST /dead-letters/{run_id}/redrive`, `run_id` typed `UUID` (malformed id gives 422 before any SQL),
+  optional JSON body `{"note": string | null}` (max 500 characters). No body at all also works.
+- Returns the run in the same shape as `GET /runs/{id}` (a shared function `load_run` builds both, so
+  the two cannot drift apart).
+- 404 if the run does not exist, 409 if it is not `dead`.
+- Redrive is an **explicit, audited action** (CLAUDE.md rule 5): nothing brings a dead run back
+  automatically, and every redrive leaves a row in `redrive_log`.
+
+### L2. One transaction, starting with `SELECT ... FOR UPDATE` on the run row
+- Steps, all in one transaction: lock the run row, check its state, copy the old reason to
+  `redrive_log`, reset the run, stamp `dead_letters.redriven_at`, read the run back.
+  Either all of it happens or none of it (any error rolls back and the run stays dead).
+- **Why `FOR UPDATE`:** the first redrive holds the row lock until it commits. A second, simultaneous
+  redrive waits at the `SELECT`, then (after the first commits) sees `state = 'ready'`, not `dead`,
+  and returns 409. So a double click or two operators cannot redrive one death twice, and the
+  state check is not a check-then-act race.
+- Test `test_two_concurrent_redrives_of_one_run_give_exactly_one_200`: two threads released together
+  by a barrier. Statuses are exactly `[200, 409]` and `redrive_log` has one row. Without the lock
+  (I removed it as a check) the test fails.
+- **Alternatives rejected:** an `UPDATE ... WHERE state = 'dead'` and check the rowcount (also
+  correct and shorter, but then the `redrive_log` insert has to come first or after separately, and
+  the old reason must be read before the update; the row lock makes the steps simple to read).
+  An optimistic `version` column would also work but needs more code.
+
+### L3. What the reset changes, and what it deliberately does not
+- Changes: `state = 'ready'`, `available_at = now()` (claimable immediately, no backoff),
+  `attempt_base = attempt`, `finished_at = NULL`, lease columns NULL.
+- **Does not touch** `attempt`, `fencing_token`, `last_error` or any `run_attempts` row. History
+  stays intact. `fencing_token` keeps rising, which is what the fencing rule needs: a stale worker
+  from before the death can never match the new token.
+- `last_error` keeps the last failure message, which is useful context if someone looks at the run
+  before it is claimed again.
+
+### L4. Fresh attempts via `attempt_base`, not by resetting `attempt` (SPEC section 3, item 2)
+- `fail` and `reap_expired_leases` now compare `attempt - attempt_base` with `max_attempts`.
+  `claim_run` returns `attempt_base` in the run dict.
+- Example, `max_attempts = 2`: dies after attempts 1 and 2; redrive sets `attempt_base = 2`;
+  attempt 3 is "1 used", it can retry; attempt 4 is "2 used", dead again.
+- **Why not reset `attempt = 0`:** `complete`, `fail` and the reaper look up their `run_attempts`
+  row by `(run_id, attempt)`. After a reset, attempt 1 would exist twice and one UPDATE would hit
+  two rows. With `attempt_base`, attempt numbers only go up. Test
+  `test_redriven_run_gets_a_fresh_set_of_attempts_and_attempt_numbers_never_repeat` checks
+  attempts `[1, 2, 3, 4]` and fails if the comparison ignores `attempt_base`.
+- Cost: one more subtraction to remember in two places.
+
+### L5. Dead letters are upserted, so the second death replaces the first
+- Old code: `INSERT INTO dead_letters ... ON CONFLICT DO NOTHING`. After a redrive the row already
+  exists, so a second death would keep the **old reason** and the old `redriven_at`, which would
+  misreport the run.
+- New code (one shared constant, `DEAD_LETTER_UPSERT`, used by `fail` and the reaper):
+  `ON CONFLICT (run_id) DO UPDATE SET reason = EXCLUDED.reason, moved_at = now(),
+  redriven_at = NULL`.
+- `dead_letters` therefore always describes the **latest** death, and `redrive_log` is the history of
+  previous ones. Test: first reason "first reason", second death "second reason"; `dead_letters`
+  shows the second one with `redriven_at` NULL, and after a second redrive `redrive_log` has both
+  previous reasons in order. The mirror case (the second death is an expired lease) has its own test.
+
+### L6. Smaller choices
+- A dead run with no `dead_letters` row would be an inconsistent state that should not happen. I
+  log the previous reason as "(no dead_letters row)" instead of failing, because `redrive_log
+  .previous_reason` is NOT NULL and the operator's job is to get the run moving.
+- `main.py` docstring updated (it still said endpoints were stubs). The stub test in
+  `test_health.py` was deleted, as its own comment said to do once the routes exist; redrive was
+  the last stub.
+- Still no authentication: anyone who can reach the API can redrive any run. Listed as a known
+  limitation in SPEC.md.
+
+### L7. Verification
+- `ruff check .` passes. Plain `pytest` with `DATABASE_URL` set: **61 passed, 1 skipped** (the
+  Weekend 3 placeholder).
+- Mutation checks (change the code on purpose, expect a failing test, then restore): ignoring
+  `attempt_base` in `fail` fails the fresh-attempts test; going back to `DO NOTHING` fails two
+  tests; removing `FOR UPDATE` fails the concurrent test. All restored and green.
+- The concurrent test depends on thread timing. It failed reliably when I removed the lock in my
+  one run, but a timing-based test can in principle pass by luck without the lock. The lock is the
+  reason it is correct; the test is the evidence, not the proof.
+
+### L8. Two likely interview questions
+1. **"How do you make an operator action like redrive safe against double clicks?"** Lock the row
+   (`SELECT ... FOR UPDATE`), check the state under the lock, and make the state change in the
+   same transaction. The second request sees the new state and gets a 409.
+2. **"Why not just reset the attempt counter?"** Because attempt numbers are part of the identity of
+   the attempt history rows. Resetting would produce duplicates. A separate base keeps the history
+   append-only while giving a fresh retry budget.
+
+### In my words (understanding gate, W2-3)
+Pending. Questions:
+- *How it works:* two operators click redrive on the same dead run at the same instant. Walk through
+  what the database does for each request.
+- *What happens when it fails:* the run dies a second time after a redrive. What does `dead_letters`
+  show, what does `redrive_log` show, and which old code line would have gotten this wrong?
+- *The trade-off:* why `attempt_base` instead of setting `attempt` back to 0, and what does it cost?
+
+Answers: (pending)

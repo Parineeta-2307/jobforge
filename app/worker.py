@@ -18,6 +18,16 @@ log = logging.getLogger("worker")
 WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
 
+# A run can die more than once (die, get redriven, die again). The second death must replace the
+# old reason and clear redriven_at, so dead_letters always describes the latest death. The
+# earlier history is kept in redrive_log.
+DEAD_LETTER_UPSERT = (
+    "INSERT INTO dead_letters (run_id, reason) VALUES (%s, %s) "
+    "ON CONFLICT (run_id) DO UPDATE SET reason = EXCLUDED.reason, moved_at = now(), "
+    "redriven_at = NULL"
+)
+
+
 class PermanentError(Exception):
     """The job can never succeed (bad payload, unknown job type). Retrying would be pointless."""
 
@@ -34,15 +44,15 @@ def claim_run(conn, worker_id: str = WORKER_ID) -> dict | None:
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT r.id, r.job_id, r.tenant_id, j.job_type, j.payload, j.max_attempts "
-            "FROM job_runs r JOIN jobs j ON j.id = r.job_id "
+            "SELECT r.id, r.job_id, r.tenant_id, j.job_type, j.payload, j.max_attempts, "
+            "r.attempt_base FROM job_runs r JOIN jobs j ON j.id = r.job_id "
             "WHERE r.state IN ('ready', 'retry_wait') AND r.available_at <= now() AND j.enabled "
             "ORDER BY r.available_at LIMIT 1 "
             "FOR UPDATE OF r SKIP LOCKED"
         ).fetchone()
         if row is None:
             return None
-        run_id, job_id, tenant_id, job_type, payload, max_attempts = row
+        run_id, job_id, tenant_id, job_type, payload, max_attempts, attempt_base = row
         attempt, fencing_token = conn.execute(
             "UPDATE job_runs SET state = 'leased', lease_owner = %s, "
             "lease_expires_at = now() + make_interval(secs => %s), "
@@ -62,6 +72,7 @@ def claim_run(conn, worker_id: str = WORKER_ID) -> dict | None:
         "payload": payload,
         "max_attempts": max_attempts,
         "attempt": attempt,
+        "attempt_base": attempt_base,
         "fencing_token": fencing_token,
         "worker_id": worker_id,
     }
@@ -170,9 +181,11 @@ def fail(conn, run: dict, error: str, transient: bool) -> str:
     """Retry with exponential backoff and jitter, or move to dead_letters.
 
     Returns "retry", "dead" or "stale" (our fencing token no longer matched, nothing changed).
-    A permanent error, or running out of attempts, means dead.
+    A permanent error, or running out of attempts, means dead. Attempts used = attempt minus
+    attempt_base, because a redrive moves attempt_base up to give the run a fresh budget.
     """
-    is_dead = (not transient) or run["attempt"] >= run["max_attempts"]
+    attempts_used = run["attempt"] - run["attempt_base"]
+    is_dead = (not transient) or attempts_used >= run["max_attempts"]
     with conn.transaction():
         if is_dead:
             updated = conn.execute(
@@ -198,11 +211,7 @@ def fail(conn, run: dict, error: str, transient: bool) -> str:
         )
         if is_dead:
             reason = error if not transient else f"out of attempts: {error}"
-            conn.execute(
-                "INSERT INTO dead_letters (run_id, reason) VALUES (%s, %s) "
-                "ON CONFLICT (run_id) DO NOTHING",
-                (run["id"], reason),
-            )
+            conn.execute(DEAD_LETTER_UPSERT, (run["id"], reason))
     return "dead" if is_dead else "retry"
 
 
@@ -217,29 +226,25 @@ def reap_expired_leases(conn) -> int:
     reaped = 0
     with conn.transaction():
         expired = conn.execute(
-            "SELECT r.id, r.attempt, j.max_attempts "
+            "SELECT r.id, r.attempt, r.attempt_base, j.max_attempts "
             "FROM job_runs r JOIN jobs j ON j.id = r.job_id "
             "WHERE r.state = 'leased' AND r.lease_expires_at < now() "
             "FOR UPDATE OF r SKIP LOCKED"
         ).fetchall()
-        for run_id, attempt, max_attempts in expired:
+        for run_id, attempt, attempt_base, max_attempts in expired:
             error = "lease expired"
             conn.execute(
                 "UPDATE run_attempts SET finished_at = now(), outcome = 'lease_expired', "
                 "error = %s WHERE run_id = %s AND attempt = %s AND outcome IS NULL",
                 (error, run_id, attempt),
             )
-            if attempt >= max_attempts:
+            if attempt - attempt_base >= max_attempts:
                 conn.execute(
                     "UPDATE job_runs SET state = 'dead', finished_at = now(), last_error = %s, "
                     "lease_owner = NULL, lease_expires_at = NULL WHERE id = %s",
                     (error, run_id),
                 )
-                conn.execute(
-                    "INSERT INTO dead_letters (run_id, reason) VALUES (%s, %s) "
-                    "ON CONFLICT (run_id) DO NOTHING",
-                    (run_id, "out of attempts: lease expired"),
-                )
+                conn.execute(DEAD_LETTER_UPSERT, (run_id, "out of attempts: lease expired"))
             else:
                 conn.execute(
                     "UPDATE job_runs SET state = 'retry_wait', last_error = %s, "

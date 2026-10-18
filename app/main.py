@@ -1,4 +1,4 @@
-"""HTTP API. Endpoints are stubs: implement them in the order given in docs/BUILD_PLAN.md."""
+"""HTTP API: health, tenants, jobs, run status and dead-letter redrive."""
 
 from typing import Literal
 from uuid import UUID
@@ -83,25 +83,69 @@ def create_job(body: JobIn) -> dict:
     return {"id": str(row[0]), "tenant_id": str(row[1]), "name": row[2]}
 
 
+def load_run(cur, run_id: UUID) -> dict | None:
+    """The job_runs row plus its attempts, or None. Used by GET /runs/{id} and by redrive."""
+    run = cur.execute("SELECT * FROM job_runs WHERE id = %s", (run_id,)).fetchone()
+    if run is None:
+        return None
+    run["attempts"] = cur.execute(
+        "SELECT attempt, worker_id, started_at, finished_at, outcome, error "
+        "FROM run_attempts WHERE run_id = %s ORDER BY attempt",
+        (run_id,),
+    ).fetchall()
+    return run
+
+
 @app.get("/runs/{run_id}")
 def get_run(run_id: UUID) -> dict:
     # run_id is typed UUID, so a malformed id is a 422 before any SQL runs.
     with get_pool().connection() as conn:
         with conn.cursor(row_factory=dict_row) as cur:
-            run = cur.execute("SELECT * FROM job_runs WHERE id = %s", (run_id,)).fetchone()
-            if run is None:
-                raise HTTPException(status_code=404, detail="run not found")
-            attempts = cur.execute(
-                "SELECT attempt, worker_id, started_at, finished_at, outcome, error "
-                "FROM run_attempts WHERE run_id = %s ORDER BY attempt",
-                (run_id,),
-            ).fetchall()
-    # FastAPI turns the UUIDs and datetimes in these dicts into JSON strings.
-    run["attempts"] = attempts
+            run = load_run(cur, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    # FastAPI turns the UUIDs and datetimes in this dict into JSON strings.
     return run
 
 
+class RedriveIn(BaseModel):
+    note: str | None = Field(default=None, max_length=500)
+
+
 @app.post("/dead-letters/{run_id}/redrive")
-def redrive(run_id: str) -> dict:
-    # TODO (Weekend 2): audited redrive of a dead-lettered run.
-    raise HTTPException(status_code=501, detail="not implemented")
+def redrive(run_id: UUID, body: RedriveIn | None = None) -> dict:
+    """Put a dead run back in the queue with a fresh set of attempts, and keep an audit row."""
+    note = body.note if body else None
+    with get_pool().connection() as conn:
+        with conn.cursor(row_factory=dict_row) as cur:
+            # FOR UPDATE locks the row until we commit. A second redrive of the same run waits
+            # here, then sees state 'ready' instead of 'dead' and gets a 409, so a double click
+            # or two clients cannot redrive the same death twice.
+            run = cur.execute(
+                "SELECT state FROM job_runs WHERE id = %s FOR UPDATE", (run_id,)
+            ).fetchone()
+            if run is None:
+                raise HTTPException(status_code=404, detail="run not found")
+            if run["state"] != "dead":
+                raise HTTPException(status_code=409, detail="run is not dead")
+            dead = cur.execute(
+                "SELECT reason FROM dead_letters WHERE run_id = %s", (run_id,)
+            ).fetchone()
+            previous_reason = dead["reason"] if dead else "(no dead_letters row)"
+            cur.execute(
+                "INSERT INTO redrive_log (run_id, previous_reason, note) VALUES (%s, %s, %s)",
+                (run_id, previous_reason, note),
+            )
+            # attempt and fencing_token are left alone and run_attempts is not touched, so the
+            # history stays intact. attempt_base = attempt starts a fresh budget of attempts.
+            cur.execute(
+                "UPDATE job_runs SET state = 'ready', available_at = now(), "
+                "attempt_base = attempt, finished_at = NULL, "
+                "lease_owner = NULL, lease_expires_at = NULL WHERE id = %s",
+                (run_id,),
+            )
+            cur.execute(
+                "UPDATE dead_letters SET redriven_at = now() WHERE run_id = %s", (run_id,)
+            )
+            result = load_run(cur, run_id)
+    return result
