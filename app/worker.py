@@ -5,6 +5,7 @@ Run several copies: docker compose up --scale worker=3
 """
 
 import logging
+import os
 import random
 import socket
 import threading
@@ -15,7 +16,8 @@ from app import config
 from app.db import get_pool
 
 log = logging.getLogger("worker")
-WORKER_ID = f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
+# The WORKER_ID environment variable lets the chaos test know the id of each worker it starts.
+WORKER_ID = os.getenv("WORKER_ID") or f"{socket.gethostname()}-{uuid.uuid4().hex[:6]}"
 
 
 # A run can die more than once (die, get redriven, die again). The second death must replace the

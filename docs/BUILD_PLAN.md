@@ -29,7 +29,7 @@ Done when: submit 100 jobs with 3 workers running, all reach `succeeded`, none t
 - [x] Tests: limiter allows exactly N then rejects, quota resets on the hour, one noisy tenant does not starve another.
 
 ## Weekend 3: proof (about 5 h)
-- [ ] Chaos test: kill workers at random mid-run, assert none lost, none doubled, no stale overwrite.
+- [x] Chaos test: kill workers at random mid-run, assert none lost, none doubled, no stale overwrite.
 - [ ] Locust load test, record throughput, p95 and the 429 share for an over-quota tenant.
 - [ ] README: architecture diagram, decisions, a results table with your own measured numbers, limitations.
 - [ ] Fill in docs/DESIGN.md. Practise explaining it out loud in 5 minutes.

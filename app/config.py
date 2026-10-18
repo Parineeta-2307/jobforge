@@ -12,6 +12,6 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 LEASE_SECONDS = _int("LEASE_SECONDS", 30)
 HEARTBEAT_SECONDS = _int("HEARTBEAT_SECONDS", 10)
-POLL_SECONDS = _int("POLL_SECONDS", 1)
+POLL_SECONDS = float(os.getenv("POLL_SECONDS", "1"))  # a float, so tests can poll every 0.2 s
 BACKOFF_BASE_SECONDS = _int("BACKOFF_BASE_SECONDS", 2)
 BACKOFF_MAX_SECONDS = _int("BACKOFF_MAX_SECONDS", 60)

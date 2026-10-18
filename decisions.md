@@ -1059,3 +1059,28 @@ and the risk).
 
 **Understanding gate (W2-5):** not asked, to save time. Questions if you want them: why does a 429
 for burst still read the quota? What exactly does the 50-thread test prove? Why fixed window and what does it cost?
+
+---
+
+## Part O: W3-1, chaos test (short version)
+
+- **What it does.** `scripts/chaos.py` creates a scratch schema, inserts 60 `record` runs (1 to 2 s each,
+  `max_attempts` 10), starts 3 real `python -m app.worker` processes (lease 3 s, heartbeat 1 s, poll 0.2 s)
+  and every 2 s hard-kills a random worker with `Popen.kill()` (no cleanup runs) and starts a replacement.
+  When every run is final it checks: none lost (all `succeeded`, one effect row each), none doubled (exactly
+  one `succeeded` attempt per run), no stale overwrite (the success is the run's last attempt, and
+  `fencing_token` equals the number of claims). It also measures recovery time per kill.
+- **Deviation from SPEC.md:** SPEC.md says to use a separate `jobforge_test` database that you create
+  with a superuser. I used a scratch schema inside the existing database (`search_path` passed to the
+  workers in the connection URL, dropped at the end). Same isolation from leftover data, but no manual
+  step, since the `jobforge` user cannot create databases.
+- **Run it:** `pytest -m chaos -s` (about a minute; excluded from the normal run by `addopts`).
+  `python -m scripts.chaos_report --machine "..."` runs it 5 times and saves `docs/results/chaos_<date>.json`.
+- **Small changes made for it:** `WORKER_ID` can come from the environment, and `POLL_SECONDS` is now a float.
+- **Checker sanity test:** a normal-suite test makes `check()` report a run that never finished, so a
+  checker that cannot fail would be noticed.
+- **One run so far (mine, on your laptop, for validation only, not for the README):** 60 runs, 24 kills,
+  no problems found. Recovery time was close to the 3 s lease (recovery is about lease length plus polling).
+  **You must run `chaos_report` yourself for numbers you can quote.**
+- Honest limit: kills hit a worker at random moments, so it cannot prove every interleaving is safe;
+  it is evidence, not a proof. The unit tests cover the specific races (fencing, double effect).

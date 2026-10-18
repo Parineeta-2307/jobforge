@@ -1,7 +1,8 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "-q"
+addopts = "-q -m 'not chaos'"
+markers = ["chaos: starts real worker processes and kills them; run with pytest -m chaos"]
 
 [tool.ruff]
 line-length = 100
