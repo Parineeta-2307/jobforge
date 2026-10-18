@@ -22,7 +22,7 @@ Done when: submit 100 jobs with 3 workers running, all reach `succeeded`, none t
 
 ## Weekend 2: idempotency, fairness, rate limiting (about 7 h)
 - [x] Idempotent side effect: the run id as a key, with a unique constraint on the effect table.
-- [ ] Per-tenant `max_concurrency` and fair claiming across tenants.
+- [x] Per-tenant `max_concurrency` and fair claiming across tenants.
 - [ ] Redis token bucket in a Lua script (burst), hourly points quota (quota), rate-limit headers, 429 with Retry-After.
 - [x] Redrive endpoint for dead letters.
 - [ ] (extra) `verify_sla` flagging missed runs.

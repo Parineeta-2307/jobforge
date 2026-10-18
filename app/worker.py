@@ -32,38 +32,96 @@ class PermanentError(Exception):
     """The job can never succeed (bad payload, unknown job type). Retrying would be pointless."""
 
 
-def claim_run(conn, worker_id: str = WORKER_ID) -> dict | None:
-    """Atomically claim one claimable run and take a lease on it. Return it, or None.
+# Step 1 of a claim: which tenant should get the next worker? (kept as a constant so that
+# scripts/explain_claim.py can run EXPLAIN on the exact same text.)
+#   - leased counts how many runs the tenant has leased right now;
+#   - the second LATERAL finds the tenant's oldest claimable run (no row = nothing to do);
+#   - a tenant at or above max_concurrency is skipped (invariant 1);
+#   - among the rest, fewest leased runs first, then the oldest waiting run (invariant 2).
+PICK_TENANT_SQL = """
+SELECT t.id
+FROM tenants t
+CROSS JOIN LATERAL (
+    SELECT count(*) AS n FROM job_runs WHERE tenant_id = t.id AND state = 'leased'
+) leased
+CROSS JOIN LATERAL (
+    SELECT r.available_at
+    FROM job_runs r JOIN jobs j ON j.id = r.job_id
+    WHERE r.tenant_id = t.id AND r.state IN ('ready', 'retry_wait')
+      AND r.available_at <= now() AND j.enabled
+    ORDER BY r.available_at
+    LIMIT 1
+) oldest
+WHERE leased.n < t.max_concurrency
+ORDER BY leased.n, oldest.available_at
+LIMIT 1
+"""
 
-    All in one transaction:
-      1. pick one run in state ready/retry_wait with available_at <= now(), oldest first, with
-         FOR UPDATE SKIP LOCKED so that a row another worker has locked is skipped, not waited for;
-      2. mark it leased, set the lease expiry, attempt + 1, fencing_token + 1;
-      3. write a run_attempts row.
-    TODO (Weekend 2): skip tenants already at max_concurrency, and pick fairly across tenants.
+# How many times claim_run re-picks a tenant if another worker got there first.
+CLAIM_TRIES = 3
+
+
+def claim_run(conn, worker_id: str = WORKER_ID) -> dict | None:
+    """Claim one run for one tenant and take a lease on it. Return it, or None.
+
+    Fair claiming: the tenant with the fewest leased runs goes first (ties: the oldest waiting
+    run), and a tenant never has more than tenants.max_concurrency runs leased. If every tenant
+    with work is at its cap, this returns None even though workers are idle: the cap is a limit.
+
+    Each try is one transaction (see _claim_for_tenant). If another worker took the tenant's last
+    free slot or last run between our pick and our lock, we pick again, up to CLAIM_TRIES times.
+    Every try is its own transaction so a worker never holds two tenant locks at once, which could
+    deadlock with another worker holding them in the opposite order.
     """
-    with conn.transaction():
-        row = conn.execute(
-            "SELECT r.id, r.job_id, r.tenant_id, j.job_type, j.payload, j.max_attempts, "
-            "r.attempt_base FROM job_runs r JOIN jobs j ON j.id = r.job_id "
-            "WHERE r.state IN ('ready', 'retry_wait') AND r.available_at <= now() AND j.enabled "
-            "ORDER BY r.available_at LIMIT 1 "
-            "FOR UPDATE OF r SKIP LOCKED"
-        ).fetchone()
-        if row is None:
-            return None
-        run_id, job_id, tenant_id, job_type, payload, max_attempts, attempt_base = row
-        attempt, fencing_token = conn.execute(
-            "UPDATE job_runs SET state = 'leased', lease_owner = %s, "
-            "lease_expires_at = now() + make_interval(secs => %s), "
-            "attempt = attempt + 1, fencing_token = fencing_token + 1 "
-            "WHERE id = %s RETURNING attempt, fencing_token",
-            (worker_id, config.LEASE_SECONDS, run_id),
-        ).fetchone()
-        conn.execute(
-            "INSERT INTO run_attempts (run_id, attempt, worker_id) VALUES (%s, %s, %s)",
-            (run_id, attempt, worker_id),
-        )
+    for _ in range(CLAIM_TRIES):
+        with conn.transaction():
+            picked = conn.execute(PICK_TENANT_SQL).fetchone()
+            if picked is None:
+                return None
+            run = _claim_for_tenant(conn, picked[0], worker_id)
+        if run is not None:
+            return run
+    return None
+
+
+def _claim_for_tenant(conn, tenant_id, worker_id: str) -> dict | None:
+    """Inside the caller's transaction: lock the tenant, re-check its cap, lease its oldest run."""
+    # Two workers can pick the same tenant at the same instant, and a plain "count, then update"
+    # would let both pass the cap check. Locking the tenant row makes claims for one tenant
+    # take turns. FOR NO KEY UPDATE (not FOR UPDATE) because inserting a job_runs row takes a
+    # weaker lock on this row for the foreign key, and we do not want to block the scheduler.
+    # No SKIP LOCKED here: skipping would make all but one worker see "no work" for a busy tenant.
+    max_concurrency = conn.execute(
+        "SELECT max_concurrency FROM tenants WHERE id = %s FOR NO KEY UPDATE", (tenant_id,)
+    ).fetchone()[0]
+    leased = conn.execute(
+        "SELECT count(*) FROM job_runs WHERE tenant_id = %s AND state = 'leased'", (tenant_id,)
+    ).fetchone()[0]
+    if leased >= max_concurrency:
+        return None  # someone filled the last slot while we waited for the lock
+    row = conn.execute(
+        "SELECT r.id, r.job_id, j.job_type, j.payload, j.max_attempts, r.attempt_base "
+        "FROM job_runs r JOIN jobs j ON j.id = r.job_id "
+        "WHERE r.tenant_id = %s AND r.state IN ('ready', 'retry_wait') "
+        "AND r.available_at <= now() AND j.enabled "
+        "ORDER BY r.available_at LIMIT 1 "
+        "FOR UPDATE OF r SKIP LOCKED",
+        (tenant_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    run_id, job_id, job_type, payload, max_attempts, attempt_base = row
+    attempt, fencing_token = conn.execute(
+        "UPDATE job_runs SET state = 'leased', lease_owner = %s, "
+        "lease_expires_at = now() + make_interval(secs => %s), "
+        "attempt = attempt + 1, fencing_token = fencing_token + 1 "
+        "WHERE id = %s RETURNING attempt, fencing_token",
+        (worker_id, config.LEASE_SECONDS, run_id),
+    ).fetchone()
+    conn.execute(
+        "INSERT INTO run_attempts (run_id, attempt, worker_id) VALUES (%s, %s, %s)",
+        (run_id, attempt, worker_id),
+    )
     return {
         "id": run_id,
         "job_id": job_id,

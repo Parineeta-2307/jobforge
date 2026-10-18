@@ -820,3 +820,147 @@ Pending. Questions:
 - *The trade-off:* why `attempt_base` instead of setting `attempt` back to 0, and what does it cost?
 
 Answers: (pending)
+
+---
+
+## Part M: W2-4, per-tenant concurrency and fair claiming (DESIGN.md Q8)
+
+### M1. What `claim_run` does now (two steps, each try in its own transaction)
+1. **Pick a tenant** (`PICK_TENANT_SQL`, one query, no locks). For every tenant it computes how many runs
+   are `leased` now and the `available_at` of its oldest claimable run (a tenant with no
+   claimable run drops out). Tenants at or above `max_concurrency` are excluded. The rest are
+   ordered by fewest leased runs first, then oldest waiting run. First row wins.
+2. **Claim for that tenant** (`_claim_for_tenant`): lock the tenant row, count its leased runs again,
+   and if still under the cap take the tenant's oldest claimable run
+   (`FOR UPDATE OF r SKIP LOCKED`), then lease it, bump attempt and fencing token, insert the
+   attempt row. Same `enabled` and `available_at <= now()` checks as before.
+- If step 2 finds the tenant already full or empty (another worker got there first), `claim_run`
+  picks again, up to `CLAIM_TRIES = 3` times, otherwise returns `None`.
+- Returning `None` when everyone with work is at their cap is deliberate: the cap is a limit, not
+  a preference, so workers sit idle rather than exceed it (test: `..._cap_holds_even_when_workers_are_idle`).
+
+### M2. Fairness rule: fewest leased first, then oldest
+- Rule: among eligible tenants pick the one with the fewest leased runs now. Ties: whoever has waited longest.
+- This is "least-loaded first", a simple relative of fair queuing. A tenant with a backlog of 500
+  gets one lease, then the quiet tenant (0 leased) goes next, and so on, so they alternate until a
+  cap or the quiet tenant's work runs out. It balances *concurrent slots*, not total throughput over time.
+- **What it does not do:** it is not weighted (every tenant counts the same, `max_concurrency` is a cap
+  not a share) and it has no memory (a tenant that just finished 1,000 runs is not penalised).
+  Real systems use weights or deficit round robin. Say this if asked, it shows you know the limit.
+- **Alternative rejected: plain round robin by tenant id.** Needs a cursor stored somewhere (a table
+  or a Redis key) and still has to skip tenants without work. Least-loaded needs no extra state, the
+  state is the `leased` rows we already have.
+
+### M3. The race, and how it is closed (the "tenant row lock" option from SPEC.md)
+- Problem: two workers pick tenant T at the same instant, both count 2 leased with cap 3, both
+  take a run: 4 leased. A count followed by an update has a check-then-act race.
+- Fix: step 2 starts with `SELECT max_concurrency FROM tenants WHERE id = %s FOR NO KEY UPDATE`.
+  Only one worker at a time holds T's row, the others wait. After the lock the count is repeated,
+  and since the earlier worker has committed by then the new count includes its lease.
+- SPEC.md said Pari chooses between the tenant row lock and an advisory lock and recommended the row
+  lock. You had not chosen yet, so I used the recommended one. **You can still change it; it is one
+  function.**
+- **`FOR NO KEY UPDATE`, not `FOR UPDATE`:** inserting a `job_runs` row (what the scheduler does)
+  takes a weak `FOR KEY SHARE` lock on the tenant row for the foreign key. `FOR UPDATE` conflicts
+  with that, so claims would briefly block the scheduler. `FOR NO KEY UPDATE` still conflicts
+  with other `FOR NO KEY UPDATE` locks (so claimers take turns) but not with `FOR KEY SHARE`.
+  Same safety, less blocking. It is only valid because we never change the tenant's key.
+- **No `SKIP LOCKED` on the tenant row** (SPEC.md rule): with one busy tenant, all but one worker
+  would be told "no work" and idle for `POLL_SECONDS`. Waiting a few milliseconds for the lock is better.
+- **Cost:** claims for one tenant are serialised for the length of the claim transaction (a few
+  statements). Claims for different tenants do not wait for each other.
+- Each retry is its own transaction. If the whole claim were one transaction, a worker that
+  locks tenant A, finds it full, then locks tenant B, would hold two tenant locks; another worker
+  doing B then A would deadlock. One lock per transaction removes that.
+
+### M4. Tests (tests/test_claim_fairness.py) and what they prove
+| Test | Proves |
+|---|---|
+| cap | cap 2 with 5 ready runs: exactly 2 claims; finishing one frees exactly one slot |
+| cap under concurrency | 20 threads on 20 connections, released together by a barrier, cap 3: exactly 3 get a run, 3 rows leased |
+| starvation | tenant A has 500 older runs, B has 5: B gets at least 5 of the first 12 claims |
+| fewest leased first | A (older) and B alternate A, B, A, B |
+| tie-break | equal leased counts: the tenant that has waited longest goes first |
+| idle cap | at cap with nothing else to do: `None` |
+| capped tenant does not block others | A capped at 1, B takes the rest |
+| disabled job | its runs are never claimed |
+- **I ran them against the old `claim_run`** (the version from the previous commit): 6 of 8 fail
+  (cap, concurrency, starvation, fewest-leased, idle cap, capped tenant). The other 2 (tie-break,
+  disabled job) are regression guards that passed before too.
+- **Mutation checks:** removing the tenant row lock makes the concurrency test fail 5 times out
+  of 5; with the lock it passes 5 out of 5. Removing the re-count after the lock also fails it.
+  So the lock *and* the re-count are both needed, and the test sees both.
+- Plain `pytest` with `DATABASE_URL` set: **69 passed, 1 skipped**. `ruff check .` passes.
+
+### M5. Test-suite side effects you should know about
+- `claim_run` now looks across all tenants and prefers the least-loaded one, so the old trick
+  (give test runs an ancient `available_at`) no longer guarantees a test claims its own run if a
+  *different* tenant already has claimable runs in the database. I added a `quiet_queue` fixture
+  (used by `make_run`): if any claimable run already exists it **fails the test with a message**
+  telling you to stop the scheduler/workers and clean up. A loud failure beats a mystery failure.
+- Default tenants have `max_concurrency = 5`, so one old test that leases 20 runs for one tenant
+  now raises the cap first (`UPDATE tenants SET max_concurrency = 100`); it is about duplicates, not caps.
+- `make_run` now derives `tenant_id` from the job, and `make_job` takes an optional `tenant_id`,
+  so tests with several tenants are straightforward. A `make_tenant` fixture cleans up what it creates.
+
+### M6. EXPLAIN ANALYZE: what it showed (saved: `docs/results/explain_claim_2026-10-18.txt`)
+Reproduce with `python -m scripts.explain_claim --machine "..." --out <file>` (it inserts synthetic
+data inside a transaction and rolls it back). Data: 50 tenants, 7,900 ready runs (one tenant has a
+3,000-run backlog, 20 runs leased). Machine: HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U
+(2 cores/4 threads), 7.8 GB RAM, Windows 11 Home build 26300, PostgreSQL 16.15, one connection.
+Single `EXPLAIN (ANALYZE)` executions, so treat as rough:
+
+| Query | Execution time |
+|---|---|
+| OLD claim query (global oldest run) | 0.055 ms and 0.078 ms (two runs) |
+| NEW step 1, pick the tenant | **49.6 ms and 44.5 ms** (two runs) |
+| NEW step 2, oldest run of the busiest tenant | 0.074 ms and 0.067 ms |
+| NEW step 1 **with the proposed index** | **0.83 ms** (one run) |
+
+**Honest reading:**
+- The fairness query is roughly 1000 times slower than the old one on this data. Both are correct;
+  the new one does much more work per claim.
+- **Why:** for each of the 50 tenants it looks for "the oldest claimable run of this tenant" using
+  `idx_runs_claimable`, which is ordered by `available_at` only. The index cannot jump to one
+  tenant, so each lookup walks the global list and throws away other tenants' rows
+  (`Rows Removed by Filter: 5374`, about 5,260 buffer hits per lookup). The counting of leased runs
+  is cheap (an index-only scan of `idx_runs_tenant_state`).
+- **Cost grows with the number of tenants** (one lookup per tenant), as SPEC.md predicted, and
+  with how far down the global order a tenant's oldest run is.
+- **Proposed fix, not applied:** an index on `(tenant_id, available_at) WHERE state IN ('ready',
+  'retry_wait')` makes each lookup a single index probe. With it step 1 drops to 0.83 ms in the
+  same test (about 50 times faster, one run). It needs a new migration (003), so it is waiting for
+  your approval. Until then every claim is about 50 ms at 8,000 waiting runs, which is fine for the 100-job
+  demo (a few runs waiting at a time) and not fine for a big backlog.
+- **At 100x** (thousands of tenants) even one probe per tenant is too much. Then the options are a
+  per-tenant counter table (leased count kept up to date instead of counted), or per-tenant queues
+  where a worker picks a tenant first and then pops from its queue. That is the answer for DESIGN.md Q8/Q10.
+- Index-only scans report `Heap Fetches: 20` here because the synthetic rows were not vacuumed; ignore.
+
+### M7. Smaller notes
+- The 100-job demo still passes with the new claim query (100 of 100 succeeded, 0 duplicated, 3
+  workers of 34/33/33, no errors in any process log). I ran it as a smoke test only; per SPEC.md
+  you re-run `python -m scripts.demo_100_jobs` yourself before quoting any number.
+- `max_concurrency` limits *leased* runs. A run in `retry_wait` or `ready` does not count.
+- The default cap is 5 per tenant (database default), so with 3 workers one tenant can use at most 5 slots.
+- The tenant-picking query scans all tenants on every claim. Fine now; see M6 for the scaling answer.
+
+### M8. Two likely interview questions
+1. **"One tenant submits 10,000 jobs. How do the others still get served?"** Claiming is
+   least-loaded-first: the tenant with the fewest running jobs goes next, so a big backlog gets
+   one slot, then the others get theirs. A per-tenant cap bounds its total share, enforced under
+   a tenant row lock so two workers cannot both take the last slot.
+2. **"What does that cost, and what breaks at 100x?"** Each claim now counts per tenant, which I
+   measured at about 50 ms for 8,000 waiting runs with the current indexes, about 0.8 ms with a
+   `(tenant_id, available_at)` partial index. At 100x tenants, replace counting with a counter
+   table or per-tenant queues.
+
+### In my words (understanding gate, W2-4)
+Pending. Questions:
+- *How it works:* walk through two workers claiming at the same instant for a tenant with cap 3 that
+  already has 2 leased runs. What does each worker do, and what does the second one see?
+- *What happens when it fails:* the picked tenant turns out to be full by the time the worker has
+  its lock. What does `claim_run` do, and why is each try its own transaction?
+- *The trade-off:* what did the fairness query cost, why is it slow on this data, and what would fix it?
+
+Answers: (pending)

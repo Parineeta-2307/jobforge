@@ -68,7 +68,9 @@ def test_run_that_is_not_due_yet_is_not_claimed(db, make_job, make_run):
     assert run is None or run["id"] != run_id
 
 
-def test_two_workers_never_get_the_same_run(db, make_job, make_run):
+def test_two_workers_never_get_the_same_run(db, tenant, make_job, make_run):
+    # Raise the tenant's cap so 20 leases are allowed; this test is about duplicates, not caps.
+    db.execute("UPDATE tenants SET max_concurrency = 100 WHERE id = %s", (tenant,))
     job_id = make_job()
     mine = {make_run(job_id) for _ in range(30)}
 
