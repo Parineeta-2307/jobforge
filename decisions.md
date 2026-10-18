@@ -929,8 +929,8 @@ Single `EXPLAIN (ANALYZE)` executions, so treat as rough:
   with how far down the global order a tenant's oldest run is.
 - **Proposed fix, not applied:** an index on `(tenant_id, available_at) WHERE state IN ('ready',
   'retry_wait')` makes each lookup a single index probe. With it step 1 drops to 0.83 ms in the
-  same test (about 50 times faster, one run). It needs a new migration (003), so it is waiting for
-  your approval. Until then every claim is about 50 ms at 8,000 waiting runs, which is fine for the 100-job
+  same test (about 50 times faster, one run). It needs a new migration (003), which you approved and
+  I applied: see M9. Until then every claim is about 50 ms at 8,000 waiting runs, which is fine for the 100-job
   demo (a few runs waiting at a time) and not fine for a big backlog.
 - **At 100x** (thousands of tenants) even one probe per tenant is too much. Then the options are a
   per-tenant counter table (leased count kept up to date instead of counted), or per-tenant queues
@@ -964,3 +964,50 @@ Pending. Questions:
 - *The trade-off:* what did the fairness query cost, why is it slow on this data, and what would fix it?
 
 Answers: (pending)
+
+### M9. Follow-up: migration 003 adds the index, and what the numbers showed (added after you approved it)
+
+- `migrations/003_claim_index.sql`:
+  `CREATE INDEX IF NOT EXISTS idx_runs_tenant_claimable ON job_runs (tenant_id, available_at)
+  WHERE state IN ('ready', 'retry_wait')`. Idempotent. Applied to the local database twice (the second
+  run only prints "already exists, skipping"), and the CI loop (001, 002, 003 in order, twice) ran
+  clean in an empty scratch schema.
+- **Why a partial, two-column index:** `tenant_id` first so one tenant's rows are together,
+  `available_at` second so "oldest first" is already sorted, so `ORDER BY available_at LIMIT 1` for a tenant is a
+  single probe. The `WHERE state IN (...)` clause means a run drops out of the index the moment it
+  is leased or finished, so the index stays as small as the queue, not as big as the table.
+- **What it costs:** every insert into `job_runs` and every state change into or out of
+  ready/retry_wait now updates one more index. Writes get slightly slower, reads on the hot path get much faster.
+  Plain `CREATE INDEX` blocks writes while building; on a large live table you would use
+  `CREATE INDEX CONCURRENTLY`.
+- **Alternative rejected: replace `idx_runs_claimable`.** It still serves the old global ordering
+  and the reaper does not use it, but dropping it is a separate decision I did not need to make.
+  (Candidate for cleanup; I have not measured whether anything still uses it.)
+
+**Re-measured** with `scripts/explain_claim.py` (now measures the pick query with and without the
+index in one transaction that is rolled back; raw files `docs/results/explain_claim_with_003_run1.txt`,
+`..._run2.txt`, `..._run3.txt`). Same machine as M6 (HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U,
+7.8 GB RAM, Windows 11 Home build 26300, PostgreSQL 16.15), same synthetic 7,900 runs:
+
+| Pick query (step 1) | run 1 | run 2 | run 3 |
+|---|---|---|---|
+| WITHOUT the index | 42.7 ms | 47.6 ms | 48.0 ms |
+| WITH the index | **49.1 ms (index not used)** | 0.87 ms | 0.55 ms |
+
+- Two more runs I did while checking run 1 (not saved as files): WITH index 0.56 ms and 0.53 ms, WITHOUT 51.5 and 52.1 ms.
+- **Honest reading:** with the index the pick query is about 50-100 times faster (about 0.5-0.9 ms versus about
+  43-52 ms) in 5 of 6 runs that had the index. **In run 1 the planner did not choose the new index** and
+  used `idx_runs_claimable` as before, so that run was as slow as without it. I checked the obvious
+  suspect (statistics on a freshly created index) by dropping and re-creating the index, with and without `ANALYZE`:
+  both were fast, so that explanation is **not supported**. I do not know the cause. It is a reminder
+  that an index is only a candidate: the planner picks the plan from its cost estimates, and
+  estimates can be wrong. Worth saying in an interview. In production you would watch the
+  claim query's real latency, not assume the index is used.
+- `explain_claim_2026-10-18.txt` is the earlier file (before the index existed, produced by the first
+  version of the script) and still shows the 49.6 ms / 44.5 ms numbers from M6.
+- Per-claim cost now: about 1 ms for tenant selection plus the lock and the updates, which no longer
+  grows with a tenant's backlog (the "walk past 5,000 other rows" problem is gone). It still grows with the
+  number of tenants, because the query makes one probe per tenant. That is the 100x problem from M6.
+
+### In my words (understanding gate, W2-4, continued)
+Add to the question list: *Why is a partial index `WHERE state IN ('ready', 'retry_wait')` better than a full index on `(tenant_id, available_at)`, and what did the first measurement teach us about trusting indexes?*

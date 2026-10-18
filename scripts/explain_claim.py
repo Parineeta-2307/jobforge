@@ -3,12 +3,14 @@
 Everything happens inside one transaction that is rolled back at the end, so nothing is left in the
 database. Run from the repo root:
     python -m scripts.explain_claim --machine "describe it" --out docs/results/explain_claim.txt
+It measures the pick query with and without the index from migrations/003.
 Data: 50 tenants. Tenant 0 has a backlog of 3000 ready runs, the other 49 have 100 each, and the
 first 10 tenants each have 2 leased runs. About 7,900 runs in total.
 """
 
 import argparse
 import platform
+from pathlib import Path
 from uuid import uuid4
 
 import psycopg
@@ -35,12 +37,10 @@ FOR UPDATE OF r SKIP LOCKED
 """
 
 
-# Proposed (NOT applied by the app or by any migration yet): lets "oldest claimable run of this
-# tenant" be one index lookup instead of a scan of the global available_at index.
-PROPOSED_INDEX_SQL = (
-    "CREATE INDEX idx_runs_tenant_claimable ON job_runs (tenant_id, available_at) "
-    "WHERE state IN ('ready', 'retry_wait')"
-)
+# Migration 003 adds this index. The script measures the pick query with and without it; the
+# DROP / CREATE happen inside the transaction that is rolled back, so your database is unchanged.
+INDEX_NAME = "idx_runs_tenant_claimable"
+INDEX_MIGRATION = Path(__file__).parent.parent / "migrations" / "003_claim_index.sql"
 
 
 def load_data(conn) -> str:
@@ -107,6 +107,12 @@ def main() -> None:
             f"python: {platform.python_version()}, postgres: {version}\n",
             f"job_runs rows in the database before the script: {before}\n",
             f"synthetic rows: {counts[0]} runs ({counts[1]} leased), 50 tenants\n\n",
+        ]
+        # Part 1: WITH the index from migration 003 (create it from the file if not applied yet).
+        conn.execute(INDEX_MIGRATION.read_text(encoding="utf-8"))
+        conn.execute("ANALYZE job_runs")
+        out += [
+            "#" * 70 + "\n# WITH index " + INDEX_NAME + " (migrations/003_claim_index.sql)\n",
             explain(conn, "NEW step 1: pick the tenant (PICK_TENANT_SQL)", PICK_TENANT_SQL),
             "\n",
             explain(
@@ -116,23 +122,23 @@ def main() -> None:
                 (busiest,),
             ),
             "\n",
-            explain(conn, "OLD claim query (before W2-4), for comparison", OLD_CLAIM_SQL),
         ]
-        # Same pick query again, after creating the proposed index inside this transaction.
-        conn.execute(PROPOSED_INDEX_SQL)
+        # Part 2: WITHOUT the index (dropped inside the transaction, rolled back below).
+        conn.execute(f"DROP INDEX {INDEX_NAME}")
         conn.execute("ANALYZE job_runs")
         out += [
-            "\n" + "#" * 70 + "\n",
-            "# Now with the proposed index (it is rolled back with everything else):\n",
-            f"# {PROPOSED_INDEX_SQL}\n",
-            explain(conn, "NEW step 1 WITH PROPOSED INDEX", PICK_TENANT_SQL),
+            "#" * 70 + "\n# WITHOUT index " + INDEX_NAME + "\n",
+            explain(conn, "NEW step 1: pick the tenant (PICK_TENANT_SQL)", PICK_TENANT_SQL),
             "\n",
             explain(
                 conn,
-                "NEW step 2 WITH PROPOSED INDEX",
+                "NEW step 2: oldest run of the busiest tenant",
                 OLDEST_RUN_FOR_TENANT_SQL,
                 (busiest,),
             ),
+            "\n",
+            "#" * 70 + "\n# For comparison\n",
+            explain(conn, "OLD claim query (before W2-4)", OLD_CLAIM_SQL),
         ]
         conn.rollback()
     with open(args.out, "w", encoding="utf-8", newline="\n") as f:

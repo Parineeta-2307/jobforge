@@ -1,0 +1,176 @@
+claim query EXPLAIN (ANALYZE, BUFFERS), synthetic data, rolled back afterwards
+machine: HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U 2 cores/4 threads, 7.8 GB RAM, Windows 11 Home build 26300, local PostgreSQL 16, single connection
+python: 3.12.10, postgres: 16.15
+job_runs rows in the database before the script: 0
+synthetic rows: 7900 runs (20 leased), 50 tenants
+
+######################################################################
+# WITH index idx_runs_tenant_claimable (migrations/003_claim_index.sql)
+===== NEW step 1: pick the tenant (PICK_TENANT_SQL) =====
+Limit  (cost=483.24..483.25 rows=1 width=32) (actual time=48.995..48.997 rows=1 loops=1)
+  Buffers: shared hit=5375
+  ->  Sort  (cost=483.24..483.29 rows=17 width=32) (actual time=48.994..48.996 rows=1 loops=1)
+        Sort Key: leased.n, r.available_at
+        Sort Method: top-N heapsort  Memory: 25kB
+        Buffers: shared hit=5375
+        ->  Nested Loop  (cost=8.74..483.16 rows=17 width=32) (actual time=0.076..48.946 rows=50 loops=1)
+              Buffers: shared hit=5375
+              ->  Nested Loop  (cost=8.30..435.07 rows=17 width=24) (actual time=0.048..0.585 rows=52 loops=1)
+                    Buffers: shared hit=115
+                    ->  Seq Scan on tenants t  (cost=0.00..1.52 rows=52 width=20) (actual time=0.011..0.030 rows=52 loops=1)
+                          Buffers: shared hit=1
+                    ->  Subquery Scan on leased  (cost=8.30..8.33 rows=1 width=8) (actual time=0.008..0.008 rows=1 loops=52)
+                          Filter: (leased.n < t.max_concurrency)
+                          Buffers: shared hit=114
+                          ->  Aggregate  (cost=8.30..8.31 rows=1 width=8) (actual time=0.007..0.007 rows=1 loops=52)
+                                Buffers: shared hit=114
+                                ->  Index Only Scan using idx_runs_tenant_state on job_runs  (cost=0.28..8.30 rows=1 width=0) (actual time=0.006..0.006 rows=0 loops=52)
+                                      Index Cond: ((tenant_id = t.id) AND (state = 'leased'::text))
+                                      Heap Fetches: 20
+                                      Buffers: shared hit=114
+              ->  Limit  (cost=0.44..2.82 rows=1 width=8) (actual time=0.929..0.929 rows=1 loops=52)
+                    Buffers: shared hit=5260
+                    ->  Nested Loop  (cost=0.44..377.07 rows=158 width=8) (actual time=0.929..0.929 rows=1 loops=52)
+                          Buffers: shared hit=5260
+                          ->  Index Scan using idx_runs_claimable on job_runs r  (cost=0.29..361.89 rows=158 width=24) (actual time=0.922..0.922 rows=1 loops=52)
+                                Index Cond: (available_at <= now())
+                                Filter: (tenant_id = t.id)
+                                Rows Removed by Filter: 5374
+                                Buffers: shared hit=5160
+                          ->  Memoize  (cost=0.15..0.24 rows=1 width=16) (actual time=0.005..0.005 rows=1 loops=50)
+                                Cache Key: r.job_id
+                                Cache Mode: logical
+                                Hits: 0  Misses: 50  Evictions: 0  Overflows: 0  Memory Usage: 7kB
+                                Buffers: shared hit=100
+                                ->  Index Scan using jobs_pkey on jobs j  (cost=0.14..0.23 rows=1 width=16) (actual time=0.003..0.003 rows=1 loops=50)
+                                      Index Cond: (id = r.job_id)
+                                      Filter: enabled
+                                      Buffers: shared hit=100
+Planning:
+  Buffers: shared hit=93
+Planning Time: 3.318 ms
+Execution Time: 49.059 ms
+
+===== NEW step 2: oldest run of the busiest tenant =====
+Limit  (cost=0.44..0.60 rows=1 width=36) (actual time=0.031..0.031 rows=1 loops=1)
+  Buffers: shared hit=6
+  ->  LockRows  (cost=0.44..493.65 rows=2992 width=36) (actual time=0.030..0.031 rows=1 loops=1)
+        Buffers: shared hit=6
+        ->  Nested Loop  (cost=0.44..463.73 rows=2992 width=36) (actual time=0.026..0.026 rows=1 loops=1)
+              Buffers: shared hit=5
+              ->  Index Scan using idx_runs_claimable on job_runs r  (cost=0.29..381.59 rows=2992 width=46) (actual time=0.014..0.014 rows=1 loops=1)
+                    Index Cond: (available_at <= now())
+                    Filter: ((state = ANY ('{ready,retry_wait}'::text[])) AND (tenant_id = '4f73b014-726e-4d88-97f9-504a825aa68b'::uuid))
+                    Buffers: shared hit=3
+              ->  Memoize  (cost=0.15..0.17 rows=1 width=22) (actual time=0.010..0.011 rows=1 loops=1)
+                    Cache Key: r.job_id
+                    Cache Mode: logical
+                    Hits: 0  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                    Buffers: shared hit=2
+                    ->  Index Scan using jobs_pkey on jobs j  (cost=0.14..0.16 rows=1 width=22) (actual time=0.009..0.009 rows=1 loops=1)
+                          Index Cond: (id = r.job_id)
+                          Filter: enabled
+                          Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=8
+Planning Time: 0.297 ms
+Execution Time: 0.061 ms
+
+######################################################################
+# WITHOUT index idx_runs_tenant_claimable
+===== NEW step 1: pick the tenant (PICK_TENANT_SQL) =====
+Limit  (cost=483.24..483.25 rows=1 width=32) (actual time=42.620..42.622 rows=1 loops=1)
+  Buffers: shared hit=5375
+  ->  Sort  (cost=483.24..483.29 rows=17 width=32) (actual time=42.619..42.621 rows=1 loops=1)
+        Sort Key: leased.n, r.available_at
+        Sort Method: top-N heapsort  Memory: 25kB
+        Buffers: shared hit=5375
+        ->  Nested Loop  (cost=8.74..483.16 rows=17 width=32) (actual time=0.058..42.579 rows=50 loops=1)
+              Buffers: shared hit=5375
+              ->  Nested Loop  (cost=8.30..435.07 rows=17 width=24) (actual time=0.034..0.408 rows=52 loops=1)
+                    Buffers: shared hit=115
+                    ->  Seq Scan on tenants t  (cost=0.00..1.52 rows=52 width=20) (actual time=0.010..0.025 rows=52 loops=1)
+                          Buffers: shared hit=1
+                    ->  Subquery Scan on leased  (cost=8.30..8.33 rows=1 width=8) (actual time=0.007..0.007 rows=1 loops=52)
+                          Filter: (leased.n < t.max_concurrency)
+                          Buffers: shared hit=114
+                          ->  Aggregate  (cost=8.30..8.31 rows=1 width=8) (actual time=0.006..0.006 rows=1 loops=52)
+                                Buffers: shared hit=114
+                                ->  Index Only Scan using idx_runs_tenant_state on job_runs  (cost=0.28..8.30 rows=1 width=0) (actual time=0.005..0.005 rows=0 loops=52)
+                                      Index Cond: ((tenant_id = t.id) AND (state = 'leased'::text))
+                                      Heap Fetches: 20
+                                      Buffers: shared hit=114
+              ->  Limit  (cost=0.44..2.82 rows=1 width=8) (actual time=0.810..0.810 rows=1 loops=52)
+                    Buffers: shared hit=5260
+                    ->  Nested Loop  (cost=0.44..377.07 rows=158 width=8) (actual time=0.810..0.810 rows=1 loops=52)
+                          Buffers: shared hit=5260
+                          ->  Index Scan using idx_runs_claimable on job_runs r  (cost=0.29..361.89 rows=158 width=24) (actual time=0.805..0.805 rows=1 loops=52)
+                                Index Cond: (available_at <= now())
+                                Filter: (tenant_id = t.id)
+                                Rows Removed by Filter: 5374
+                                Buffers: shared hit=5160
+                          ->  Memoize  (cost=0.15..0.24 rows=1 width=16) (actual time=0.004..0.004 rows=1 loops=50)
+                                Cache Key: r.job_id
+                                Cache Mode: logical
+                                Hits: 0  Misses: 50  Evictions: 0  Overflows: 0  Memory Usage: 7kB
+                                Buffers: shared hit=100
+                                ->  Index Scan using jobs_pkey on jobs j  (cost=0.14..0.23 rows=1 width=16) (actual time=0.002..0.002 rows=1 loops=50)
+                                      Index Cond: (id = r.job_id)
+                                      Filter: enabled
+                                      Buffers: shared hit=100
+Planning:
+  Buffers: shared hit=36
+Planning Time: 0.506 ms
+Execution Time: 42.686 ms
+
+===== NEW step 2: oldest run of the busiest tenant =====
+Limit  (cost=0.44..0.60 rows=1 width=36) (actual time=0.032..0.033 rows=1 loops=1)
+  Buffers: shared hit=6
+  ->  LockRows  (cost=0.44..493.65 rows=2992 width=36) (actual time=0.031..0.032 rows=1 loops=1)
+        Buffers: shared hit=6
+        ->  Nested Loop  (cost=0.44..463.73 rows=2992 width=36) (actual time=0.030..0.030 rows=1 loops=1)
+              Buffers: shared hit=5
+              ->  Index Scan using idx_runs_claimable on job_runs r  (cost=0.29..381.59 rows=2992 width=46) (actual time=0.022..0.022 rows=1 loops=1)
+                    Index Cond: (available_at <= now())
+                    Filter: ((state = ANY ('{ready,retry_wait}'::text[])) AND (tenant_id = '4f73b014-726e-4d88-97f9-504a825aa68b'::uuid))
+                    Buffers: shared hit=3
+              ->  Memoize  (cost=0.15..0.17 rows=1 width=22) (actual time=0.007..0.007 rows=1 loops=1)
+                    Cache Key: r.job_id
+                    Cache Mode: logical
+                    Hits: 0  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                    Buffers: shared hit=2
+                    ->  Index Scan using jobs_pkey on jobs j  (cost=0.14..0.16 rows=1 width=22) (actual time=0.005..0.005 rows=1 loops=1)
+                          Index Cond: (id = r.job_id)
+                          Filter: enabled
+                          Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=9
+Planning Time: 0.274 ms
+Execution Time: 0.062 ms
+
+######################################################################
+# For comparison
+===== OLD claim query (before W2-4) =====
+Limit  (cost=0.44..0.52 rows=1 width=86) (actual time=0.030..0.031 rows=1 loops=1)
+  Buffers: shared hit=6
+  ->  LockRows  (cost=0.44..643.49 rows=7880 width=86) (actual time=0.030..0.030 rows=1 loops=1)
+        Buffers: shared hit=6
+        ->  Nested Loop  (cost=0.44..564.69 rows=7880 width=86) (actual time=0.029..0.029 rows=1 loops=1)
+              Buffers: shared hit=5
+              ->  Index Scan using idx_runs_claimable on job_runs r  (cost=0.29..361.89 rows=7880 width=66) (actual time=0.020..0.021 rows=1 loops=1)
+                    Index Cond: (available_at <= now())
+                    Filter: (state = ANY ('{ready,retry_wait}'::text[]))
+                    Buffers: shared hit=3
+              ->  Memoize  (cost=0.15..0.17 rows=1 width=36) (actual time=0.007..0.007 rows=1 loops=1)
+                    Cache Key: r.job_id
+                    Cache Mode: logical
+                    Hits: 0  Misses: 1  Evictions: 0  Overflows: 0  Memory Usage: 1kB
+                    Buffers: shared hit=2
+                    ->  Index Scan using jobs_pkey on jobs j  (cost=0.14..0.16 rows=1 width=36) (actual time=0.005..0.005 rows=1 loops=1)
+                          Index Cond: (id = r.job_id)
+                          Filter: enabled
+                          Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=17
+Planning Time: 0.215 ms
+Execution Time: 0.060 ms
