@@ -1,21 +1,29 @@
 """HTTP API: health, tenants, jobs, run status and dead-letter redrive."""
 
+import logging
 from typing import Literal
 from uuid import UUID
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+import redis
+from fastapi import FastAPI, HTTPException, Response
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, field_validator
 
+from app import ratelimit
 from app.db import get_pool
 
 app = FastAPI(title="jobforge")
+log = logging.getLogger("api")
 
 
 class TenantIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
+    # Optional limits. When left out, the database defaults apply (see create_tenant).
+    points_quota_per_hour: int | None = Field(default=None, ge=1, le=1_000_000)
+    burst_rps: int | None = Field(default=None, ge=1, le=10_000)
+    max_concurrency: int | None = Field(default=None, ge=1, le=1_000)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -50,18 +58,68 @@ def create_tenant(body: TenantIn) -> dict:
     with get_pool().connection() as conn:
         try:
             row = conn.execute(
-                "INSERT INTO tenants (name) VALUES (%s) RETURNING id, name",
-                (body.name,),
+                # COALESCE falls back to the column defaults of tenants (migrations/001_init.sql).
+                "INSERT INTO tenants (name, points_quota_per_hour, burst_rps, max_concurrency) "
+                "VALUES (%s, COALESCE(%s, 10000), COALESCE(%s, 50), COALESCE(%s, 5)) "
+                "RETURNING id, name",
+                (body.name, body.points_quota_per_hour, body.burst_rps, body.max_concurrency),
             ).fetchone()
         except psycopg.errors.UniqueViolation:
             raise HTTPException(status_code=409, detail="tenant name already exists") from None
     return {"id": str(row[0]), "name": row[1]}
 
 
+def apply_rate_limit(body: JobIn) -> dict[str, str]:
+    """Check the tenant's burst limit, then its hourly quota. Return the headers to send.
+
+    Raises 404 for an unknown tenant (before touching Redis, so made-up tenant ids never create
+    keys) and 429 with Retry-After when a limit is hit. If Redis is down the request is allowed
+    and a warning is logged (fail open): the limiter protects capacity, and must not be the
+    reason that job submission stops working. The cost is that limits are not enforced meanwhile.
+    """
+    with get_pool().connection() as conn:
+        tenant = conn.execute(
+            "SELECT burst_rps, points_quota_per_hour FROM tenants WHERE id = %s",
+            (body.tenant_id,),
+        ).fetchone()
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="tenant not found")
+    burst_rps, quota = tenant
+    tenant_id = str(body.tenant_id)
+    cost = ratelimit.JOB_TYPE_COST[body.job_type]
+
+    try:
+        # Bucket: holds burst_rps tokens and refills burst_rps per second.
+        allowed, _, retry_after = ratelimit.check_burst(
+            tenant_id, "POST /jobs", burst_rps, burst_rps
+        )
+        if not allowed:
+            # cost 0 only reads how many points are left, so the headers on a 429 are accurate.
+            _, left, _ = ratelimit.charge_points(tenant_id, 0, quota)
+            reject(quota, left, retry_after, "burst", "burst limit exceeded")
+        allowed, left, reset_in = ratelimit.charge_points(tenant_id, cost, quota)
+        if not allowed:
+            # No refund of the burst token spent above: simpler, and the request did arrive.
+            reject(quota, left, reset_in, "quota", "hourly quota exceeded")
+    except (redis.RedisError, OSError):
+        log.warning("rate limiter unavailable, allowing the request", exc_info=True)
+        return {}
+    return ratelimit.rate_limit_headers(quota, left, ratelimit.is_near_limit(quota, left))
+
+
+def reject(quota: int, left: int, retry_after: int, reason: str, detail: str) -> None:
+    """Raise the 429 response, with the rate-limit headers, Retry-After and the reason."""
+    headers = ratelimit.rate_limit_headers(quota, left, ratelimit.is_near_limit(quota, left))
+    headers["Retry-After"] = str(max(retry_after, 1))
+    headers["RateLimit-Reason"] = reason
+    raise HTTPException(status_code=429, detail=detail, headers=headers)
+
+
 @app.post("/jobs")
-def create_job(body: JobIn) -> dict:
-    # TODO (Weekend 2): put the rate limiter in front of this route (see app/ratelimit.py)
-    # and return X-RateLimit-* headers and 429 + Retry-After.
+def create_job(body: JobIn, response: Response) -> dict:
+    # Order: body is validated first (422), then tenant lookup (404), burst, quota (429).
+    # A rejected request returns before the INSERT, so it never creates a job.
+    response.headers.update(apply_rate_limit(body))
     with get_pool().connection() as conn:
         try:
             row = conn.execute(
