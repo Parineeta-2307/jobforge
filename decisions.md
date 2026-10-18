@@ -1011,3 +1011,51 @@ index in one transaction that is rolled back; raw files `docs/results/explain_cl
 
 ### In my words (understanding gate, W2-4, continued)
 Add to the question list: *Why is a partial index `WHERE state IN ('ready', 'retry_wait')` better than a full index on `(tenant_id, available_at)`, and what did the first measurement teach us about trusting indexes?*
+
+---
+
+## Part N: W2-5, Redis rate limiter on POST /jobs (short version)
+
+**What it does.** `POST /jobs` checks, in order: body valid (422), tenant exists (404, before Redis is
+touched so made-up tenant ids create no keys), burst bucket, hourly quota. A rejection is a 429 with
+`Retry-After` (whole seconds, rounded up), `RateLimit-Reason: burst|quota` and the three
+`X-RateLimit-*` headers; it returns before the INSERT, so no job is created. Every response
+(200 and 429) carries `X-RateLimit-Limit` (hourly quota), `-Remaining` (points left) and
+`-NearLimit` (true at 20% or less left). Modelled on Jira Cloud's published design, not identical to it.
+
+**Decisions and trade-offs**
+- **Two limits.** Burst (token bucket, capacity = refill per second = `tenants.burst_rps`) stops a
+  one-second spike. Hourly points quota stops a steady drip that adds up. One limit cannot do both.
+- **Lua scripts, not GET then SET.** Reading the counter and writing it back from Python lets two API
+  processes both see "1 token left" and both spend it. A Lua script runs as one uninterrupted unit
+  in Redis. The test with 50 threads on a bucket of 10 asserts exactly 10 pass.
+- **Time comes from Redis (`TIME`), not the API server**, so API servers with different clocks agree.
+  Bucket keys expire when the bucket would be full again, so idle tenants leave no keys.
+- **Quota is a fixed window per UTC hour.** Cheap and simple. Known flaw: a tenant can use the full
+  quota at 10:59 and again at 11:00, up to 2x across the boundary. A sliding window would fix it at
+  the cost of more state.
+- **Cost per job type** (`JOB_TYPE_COST`): noop 1, sleep 2, record 3, flaky 1. These are my
+  provisional design choices, not measurements: `sleep` holds a worker lease, `record` also writes
+  to the database. **Change them if you disagree, and be ready to justify the final numbers.**
+- **No refund of the burst token** when the quota check fails. Simpler, and the request did arrive.
+  A 429 for burst reads the quota with a cost-0 charge so its headers are accurate.
+- **Fail open when Redis is down:** the request is allowed and a warning is logged. The limiter
+  protects capacity and must not be the reason submissions stop. Risk: while Redis is down, limits
+  are not enforced. Each request also waits up to the 0.5 s Redis timeout; a circuit breaker would
+  remove that, not built. Test: Redis made to fail, job still accepted, no limit headers.
+- A request that is allowed but then fails the INSERT (duplicate name) has already spent its points.
+- `TenantIn` accepts optional `points_quota_per_hour`, `burst_rps`, `max_concurrency` (1 up to
+  1,000,000 / 10,000 / 1,000). The SQL uses `COALESCE(%s, <default>)`; a test checks the defaults
+  still equal the table's (10000, 50, 5).
+
+**Verification.** Locally ruff passes and pytest gives 72 passed, 11 skipped: this machine has no
+Redis (no Docker, no WSL), so the 10 Redis tests were skipped here. They ran in CI, which has a
+Redis 7 service, and CI is green (you reported it; I have not seen the log). Running them against
+your hosted Redis later is still worth doing. I did not run mutation checks on this task to save time.
+
+**Likely interview questions.** (1) Why Lua, what breaks without it? (a race between read and write;
+the 50-thread test). (2) Why two limits? (burst vs sustained). (3) What if Redis dies? (fail open,
+and the risk).
+
+**Understanding gate (W2-5):** not asked, to save time. Questions if you want them: why does a 429
+for burst still read the quota? What exactly does the 50-thread test prove? Why fixed window and what does it cost?
