@@ -1098,3 +1098,29 @@ for burst still read the quota? What exactly does the 50-thread test prove? Why 
   Windows) before failing open. I added a circuit breaker (after one Redis failure, skip Redis for 5 s). Submission then took
   1.8 s. Test: the second request while the breaker is open does not call Redis. This also
   replaces the "each request waits up to 0.5 s" limitation noted in Part N.
+
+---
+
+## Part Q: W3-3, load test and fairness demo (short version)
+
+- **Files.** `loadtest/locustfile.py` (user classes `BaselineUser`, `NoisyUser`, `QuietUser`; tenants are created once at test
+  start and deleted at the end; a 429 is counted per tenant, not as a failure; stats reset after a 10 s warm-up;
+  `LOAD_SUMMARY_PATH` saves a JSON summary). `scripts/fairness_demo.py` (a noisy tenant queues 300 `sleep(1s)` runs, a quiet
+  tenant then submits 10; measures how long the quiet tenant takes to finish).
+- **Baseline results** (`docs/results/load_baseline_2026-10-24_run{1,2,3}.*`, 20 users, 60 s measured after a 10 s warm-up,
+  `POST /jobs` with `noop`, one tenant with a huge quota, one uvicorn process, Locust on the same laptop, **Redis not running so the
+  limiter was failing open**; HP Pavilion x360 14-dh1xxx, i3-10110U, 7.8 GB RAM, Windows 11, PostgreSQL 16.15):
+  151.8 to 155.9 requests/s, p50 30 to 36 ms, p95 69 to 130 ms, p99 1.1 to 1.2 s, 0 failures.
+  Read these as "on this machine", not capacity. **The p99 of about 1.1 s is probably the circuit breaker retrying the dead Redis every 5 s
+  (a retry costs about 1 s here), not the database. That is a hypothesis; I did not isolate it.** With Redis running the numbers will differ.
+- **Fairness results** (`docs/results/fairness_2026-10-24_run{1,2,3}.txt`, 1 API, 1 scheduler, 3 workers): all 10 quiet jobs
+  succeeded 11.4 s after the first was submitted in each of 3 runs, while only 27 to 31 of the noisy tenant's 300 runs had finished.
+  I did **not** measure the old oldest-first claiming, so there is no before/after number. Reasoning only: 300 one-second runs on 3
+  workers take about 100 s, and with oldest-first the quiet jobs would sit behind them.
+- **Not done: scenario 2 (over-quota, 429 share).** It needs a reachable Redis, and this laptop has none. The code is written; run
+  `locust -f loadtest/locustfile.py NoisyUser QuietUser --headless -u 10 -r 10 -t 70s --host http://127.0.0.1:8000` with `REDIS_URL` set.
+- **A bug in my first version, and a trap for the results:** the first load-test version let each simulated user create its own
+  tenant (requests yield to other users while waiting), which left 76 tenants and about 34,000 jobs behind. The scheduler and workers then
+  processed them during my first fairness runs and made those results meaningless. I deleted my test data and the result files,
+  fixed it (create the tenants once in the test-start hook) and repeated all runs. Lesson: check that a test cleans up after itself, and
+  check the database is quiet before measuring.

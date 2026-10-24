@@ -1,0 +1,5 @@
+machine: HP Pavilion x360 14-dh1xxx, Intel Core i3-10110U 2 cores/4 threads, 7.8 GB RAM, Windows 11 Home build 26300, local PostgreSQL 16.15, Redis not running
+noisy backlog: 300 sleep(1s) runs; quiet tenant: 10 jobs
+setup: 1 API process, 1 scheduler, 3 workers, fair claiming (migrations 001-003)
+quiet tenant: all 10 jobs succeeded 11.4 s after the first was submitted
+noisy tenant runs succeeded by then: 31 of 300
