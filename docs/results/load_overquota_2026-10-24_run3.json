@@ -1,0 +1,26 @@
+{
+  "measured_seconds": 59.6,
+  "redis_reachable": true,
+  "tenants": {
+    "noisy": {
+      "requests": 5507,
+      "requests_per_second": 92.4,
+      "429s": 5507,
+      "429_percent": 100.0,
+      "failures": 0,
+      "p50_ms": 19,
+      "p95_ms": 35,
+      "p99_ms": 42
+    },
+    "quiet": {
+      "requests": 786,
+      "requests_per_second": 13.2,
+      "429s": 0,
+      "429_percent": 0.0,
+      "failures": 0,
+      "p50_ms": 20,
+      "p95_ms": 41,
+      "p99_ms": 47
+    }
+  }
+}

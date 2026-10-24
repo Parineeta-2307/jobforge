@@ -1124,3 +1124,25 @@ for burst still read the quota? What exactly does the 50-thread test prove? Why 
   processed them during my first fairness runs and made those results meaningless. I deleted my test data and the result files,
   fixed it (create the tenants once in the test-start hook) and repeated all runs. Lesson: check that a test cleans up after itself, and
   check the database is quiet before measuring.
+
+### Part Q addendum: Redis scenarios (local Redis), and what they showed
+
+- **Why local Redis.** Free hosted Redis plans have limits (memory, connections, sometimes a daily command cap) that
+  would make a load test fail in a misleading way. I ran the Windows port of Redis 5.0.14.1 (`tporadowski/redis`,
+  a community build, last release Feb 2022; zip downloaded to `E:\Coding\redis-local`, outside the repo, sha256 `018ea18a...ccf`)
+  on `127.0.0.1:6379` with persistence off. CI uses Redis 7, so the Lua scripts have now passed on two versions.
+  Start it with `redis-server.exe --bind 127.0.0.1 --port 6379 --save "" --appendonly no` and set
+  `REDIS_URL=redis://127.0.0.1:6379/0`. Use `127.0.0.1`, not `localhost`: a failed connection to `localhost` took about 1 s on this machine.
+- **The 10 Redis tests pass locally** (first time they ran here; they had only run in CI).
+- **Over-quota scenario** (`docs/results/load_overquota_2026-10-24_run{1,2,3}.*`, 5 noisy + 5 quiet users, 60 s measured
+  after a 10 s warm-up, Redis on localhost, same laptop as before). Noisy tenant (50 points/hour, 5 requests/s burst):
+  5,132 / 5,456 / 5,507 requests, **100% answered 429**. Quiet tenant (default limits): 760 / 787 / 786 requests, **0 429s**,
+  p95 61 / 42 / 41 ms. Caveat: the 429 share is 100% *because* the noisy tenant's hourly quota is used up in the 10 s warm-up,
+  which the statistics exclude. Over the whole run a small number of its requests (about 50 points' worth) were accepted.
+- **Baseline with Redis active** (`docs/results/load_baseline_redis_2026-10-24_run{1,2,3}.*`, 20 users): 232 to 236 requests/s,
+  p50 24 to 25 ms, p95 56 to 57 ms, p99 69 to 71 ms, 0 failures. The quiet tenant's p95 (41 to 61 ms, with 10 users) is in the
+  same range as the baseline p95 (56 to 57 ms, with 20 users). The user counts differ, so call it "similar", not "equal".
+- **This confirms my earlier hypothesis.** The earlier baseline *without* Redis (limiter failing open) had 152 to 156 requests/s and a p99
+  of 1.1 to 1.2 s. With Redis it is about 235 requests/s and p99 about 70 ms. The slow tail came from the breaker re-trying
+  the dead Redis every 5 s, as suspected. For the README use the **with-Redis** numbers as the baseline; keep the without-Redis files
+  only as evidence of the fail-open cost.

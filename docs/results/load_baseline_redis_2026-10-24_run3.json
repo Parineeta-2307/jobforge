@@ -1,0 +1,16 @@
+{
+  "measured_seconds": 59.5,
+  "redis_reachable": true,
+  "tenants": {
+    "baseline": {
+      "requests": 14032,
+      "requests_per_second": 235.8,
+      "429s": 0,
+      "429_percent": 0.0,
+      "failures": 0,
+      "p50_ms": 24,
+      "p95_ms": 56,
+      "p99_ms": 71
+    }
+  }
+}
