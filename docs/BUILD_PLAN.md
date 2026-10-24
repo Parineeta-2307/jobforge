@@ -4,7 +4,7 @@ Do not take hours from DSA. Finish the core first. Weekend 2 items marked (extra
 Commit after every checked box so the history shows steady progress.
 
 ## Before you start (30 min)
-- [ ] Create the GitHub repo, push this scaffold, confirm the CI run is green.
+- [x] Create the GitHub repo, push this scaffold, confirm the CI run is green.
 - [ ] `docker compose up --build`, open http://localhost:8000/health, then `make psql` and run `\dt`.
 
 ## Weekend 1: core (about 8 h)
@@ -31,7 +31,7 @@ Done when: submit 100 jobs with 3 workers running, all reach `succeeded`, none t
 ## Weekend 3: proof (about 5 h)
 - [x] Chaos test: kill workers at random mid-run, assert none lost, none doubled, no stale overwrite.
 - [x] Locust load test, record throughput, p95 and the 429 share for an over-quota tenant.
-- [ ] README: architecture diagram, decisions, a results table with your own measured numbers, limitations.
+- [x] README: architecture diagram, decisions, a results table with your own measured numbers, limitations.
 - [ ] Fill in docs/DESIGN.md. Practise explaining it out loud in 5 minutes.
 
 ## Then tell me
