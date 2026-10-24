@@ -7,14 +7,19 @@ from uuid import UUID
 import psycopg
 import redis
 from fastapi import FastAPI, HTTPException, Response
+from fastapi.staticfiles import StaticFiles
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field, field_validator
 
 from app import ratelimit
 from app.db import get_pool
+from app.status import STATIC_DIR
+from app.status import router as status_router
 
 app = FastAPI(title="jobforge")
+app.include_router(status_router)  # the read-only status page: GET / and GET /status
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 log = logging.getLogger("api")
 
 

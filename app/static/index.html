@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jobforge status</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header>
+  <h1>jobforge</h1>
+  <p id="meta">loading</p>
+  <label class="pause"><input type="checkbox" id="pause"> pause refresh</label>
+</header>
+
+<main>
+  <section>
+    <h2>Runs by state</h2>
+    <dl id="counts" class="counts"></dl>
+  </section>
+
+  <section>
+    <h2>Tenants <span class="note">most waiting first, 20 at most</span></h2>
+    <div class="scroll">
+      <table id="tenants">
+        <thead>
+          <tr><th>name</th><th class="n">waiting</th><th class="n">leased / cap</th>
+              <th class="n">succeeded</th><th class="n">dead</th>
+              <th class="n">burst / s</th><th class="n">points / hour</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Newest runs <span class="note">12 most recently created</span></h2>
+    <div class="scroll">
+      <table id="runs">
+        <thead>
+          <tr><th>created</th><th>tenant</th><th>job</th><th>type</th>
+              <th>state</th><th class="n">attempt</th><th>worker</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Dead letters <span class="note">10 most recent. Redrive is POST /dead-letters/{run_id}/redrive</span></h2>
+    <div class="scroll">
+      <table id="dead">
+        <thead>
+          <tr><th>died</th><th>tenant</th><th>job</th><th>reason</th><th>redriven</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+
+<footer>Read-only. Refreshes every 3 seconds. No authentication: this page shows every tenant.</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

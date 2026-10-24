@@ -19,7 +19,7 @@ build 26300, PostgreSQL 16.15. The API, Locust, PostgreSQL and Redis all ran on 
 | Redis rate limiter with 429 and `Retry-After` | **Yes** | `tests/test_ratelimit.py` (50 threads on a bucket of 10 let exactly 10 through; 429 with `Retry-After` and `RateLimit-Reason`; headers on 200 and 429); `docs/results/load_overquota_*` |
 | Chaos test with workers killed | **Yes** | `tests/test_worker_kill.py::test_no_run_lost_or_doubled_when_workers_are_killed` (`pytest -m chaos -s`); `docs/results/chaos_2026-10-18.json` |
 
-Not built, so do not claim: authentication, a web UI, deployment, multi-region, the SLA verifier, catch-up scheduling.
+Not built, so do not claim: authentication, deployment, a UI for creating jobs (there is only a small read-only status page), multi-region, the SLA verifier, catch-up scheduling.
 
 ## Measured numbers
 

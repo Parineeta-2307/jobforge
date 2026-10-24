@@ -72,6 +72,11 @@ pytest                                           # the normal suite (Redis tests
 pytest -m chaos -s                               # kills workers at random, about a minute
 ```
 
+Open http://127.0.0.1:8000/ for a small read-only status page (run counts, tenants, newest runs, dead letters;
+plain HTML, CSS and JS in `app/static`, no framework). The screenshot below uses demo data. It has no authentication, so it shows every tenant.
+
+![status page with demo data](docs/status-page.jpg)
+
 `docker-compose.yml` and the `Dockerfile` exist but were never tested.
 
 ## Design decisions (full reasoning in [decisions.md](decisions.md))

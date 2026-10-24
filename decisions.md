@@ -1146,3 +1146,19 @@ for burst still read the quota? What exactly does the 50-thread test prove? Why 
   of 1.1 to 1.2 s. With Redis it is about 235 requests/s and p99 about 70 ms. The slow tail came from the breaker re-trying
   the dead Redis every 5 s, as suspected. For the README use the **with-Redis** numbers as the baseline; keep the without-Redis files
   only as evidence of the fail-open cost.
+
+---
+
+## Part R: read-only status page (short version)
+
+- **What.** `GET /` serves `app/static/index.html` (plus `style.css`, `app.js`); `GET /status` returns run counts by state, tenants (waiting,
+  leased / cap, succeeded, dead, limits), the 12 newest runs and the 10 newest dead letters. The page refreshes every 3 s. All SQL is `SELECT`;
+  `POST /status` is a 405 (tested).
+- **Why this was added though SPEC.md listed a web UI as out of scope:** Pari asked for it. It is deliberately small and read-only.
+- **No framework, no build step.** Plain files served by FastAPI. Every value is inserted with `textContent`, never `innerHTML`, because tenant and job names
+  come from API clients; a test and the demo data (a tenant named with an HTML tag) check this.
+- **Look.** One restrained style on purpose: tables and thin rules instead of cards, no shadows, gradients, icons or rounded boxes, system fonts with a
+  monospace for numbers, light and dark follow the OS setting. Checked by eye in both modes with demo data, not with automated visual tests.
+- **Limits.** No authentication, so it shows every tenant; the counts query scans `job_runs` each refresh (fine at this scale, not at 100x).
+  It is not hosted anywhere. Vercel cannot host the backend (long-running workers and a scheduler do not fit serverless functions), so a static
+  copy of the page on Vercel would need the API running somewhere else with CORS enabled.
